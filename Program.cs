@@ -1,8 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-//using ILOG.CPLEX;
-//using ILOG.Concert;
 
 namespace StochasticFarmerProblem
 {
