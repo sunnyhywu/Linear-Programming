@@ -2,6 +2,80 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 
+
+namespace StochasticFarmerProblem
+{
+    class BendersDecomposition
+    {
+        static void Main(string[] args)
+        {
+            // 1. Prompt the user to choose the number of scenarios
+            Console.WriteLine("Enter the number of scenarios:");
+
+            int numScenarios;
+            while (!int.TryParse(Console.ReadLine(), out numScenarios) || numScenarios <= 0)
+            {
+                Console.WriteLine("Invalid input. Please enter a positive integer for the number of scenarios.");
+            }
+
+            // 2. Generate the list of variables based on the number of scenarios
+            List<string> availableVariables = GenerateVariables(numScenarios);
+
+            // Display the list of available variables to the user
+            Console.WriteLine($"\nAvailable variables for {numScenarios} scenarios:");
+            foreach (var variable in availableVariables)
+            {
+                Console.Write(variable + " ");
+            }
+            Console.WriteLine(); // Add a line break for better readability
+
+            static List<string> GenerateVariables(int numScenarios)
+            {
+                // Generate variables based on the number of scenarios
+                List<string> variables = new List<string>();
+
+                // Master problem decision variables (e.g., x1, x2, x3)
+                for (int i = 1; i <= 3; i++) // Assuming three x variables
+                {
+                    variables.Add($"x_{i}");
+                }
+                // Subproblem variables (e.g., w1x, y1x, etc.)
+                for (int s = 1; s <= numScenarios; s++)
+                {
+                    variables.Add($"w_1_{s}");
+                    variables.Add($"w_2_{s}");
+                    variables.Add($"w_3_{s}");
+                    variables.Add($"y_1_{s}");
+                    variables.Add($"y_2_{s}");
+                    variables.Add($"y_3_{s}");
+                }
+
+                return variables;
+            }
+
+        }
+
+    }
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/*
 namespace StochasticFarmerProblem
 {
     class Program
@@ -181,3 +255,4 @@ namespace StochasticFarmerProblem
     }
     }
 }
+*/
