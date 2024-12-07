@@ -19,15 +19,72 @@ namespace StochasticFarmerProblem
             }
 
             // 2. Generate the list of variables based on the number of scenarios
-            List<string> availableVariables = GenerateVariables(numScenarios);
+            List<string> allVariables = GenerateVariables(numScenarios);
 
             // Display the list of available variables to the user
             Console.WriteLine($"\nAvailable variables for {numScenarios} scenarios:");
-            foreach (var variable in availableVariables)
+            foreach (var variable in allVariables)
             {
                 Console.Write(variable + " ");
             }
             Console.WriteLine(); // Add a line break for better readability
+
+            // 3. Construct the objective coefficient matrix
+            double[] objectiveCoefficients = BuildObjectiveCoefficients(allVariables, numScenarios);
+
+            // Display the objective coefficients
+            Console.WriteLine("\nObjective Coefficient Matrix:");
+            for (int i = 0; i < allVariables.Count; i++)
+            {
+                Console.WriteLine($"{allVariables[i]}: {objectiveCoefficients[i]}");
+            }
+
+            static double[] BuildObjectiveCoefficients(List<string> variables, int numScenarios)
+            {
+                // Initialize coefficients based on variables
+                Dictionary<string, double> allcoefficients = new Dictionary<string, double>
+           { { "x_1", 150 }, { "x_2", 230 },{ "x_3", 260 }};
+
+                for (int s = 1; s <= numScenarios; s++)
+                {
+                    allcoefficients[$"w_1_{s}"] = -170.0 / numScenarios;
+                    allcoefficients[$"w_2_{s}"] = -150.0 / numScenarios;
+                    allcoefficients[$"w_3_{s}"] = -36.0 / numScenarios;
+                    allcoefficients[$"w_3_{s}"] = -10.0 / numScenarios;
+                    allcoefficients[$"y_1_{s}"] = 238.0 / numScenarios;
+                    allcoefficients[$"y_2_{s}"] = 210.0 / numScenarios;
+                }
+
+                // Map coefficients to the variable list
+                double[] result = new double[variables.Count];
+                for (int i = 0; i < variables.Count; i++)
+                {
+                    result[i] = allcoefficients.ContainsKey(variables[i]) ? allcoefficients[variables[i]] : 0.0;
+                }
+                return result;
+            }
+
+            // 3. Generate LHS matrix with coefficients varying by uniform distribution
+            double[,] lhsMatrix = GenerateLhsMatrix(allVariables, numScenarios);
+            double[] rhsMatrix = GenerateRhsMatrix(numScenarios);
+
+            // Display the LHS matrix
+            Console.WriteLine("\nLHS Matrix (Constraint Coefficients):");
+            for (int i = 0; i < lhsMatrix.GetLength(0); i++)
+            {
+                for (int j = 0; j < lhsMatrix.GetLength(1); j++)
+                {
+                    Console.Write($"{lhsMatrix[i, j],8:F2} ");
+                }
+                Console.WriteLine();
+            }
+
+            // Display the RHS matrix
+            Console.WriteLine("\nRHS Matrix:");
+            foreach (var rhs in rhsMatrix)
+            {
+                Console.WriteLine($"{rhs:F2}");
+            }
 
             static List<string> GenerateVariables(int numScenarios)
             {
@@ -45,15 +102,105 @@ namespace StochasticFarmerProblem
                     variables.Add($"w_1_{s}");
                     variables.Add($"w_2_{s}");
                     variables.Add($"w_3_{s}");
+                    variables.Add($"w_4_{s}");
                     variables.Add($"y_1_{s}");
                     variables.Add($"y_2_{s}");
-                    variables.Add($"y_3_{s}");
                 }
 
                 return variables;
             }
 
-        }
+            static double[,] GenerateLhsMatrix(List<string> variables, int numScenarios)
+            {
+                int numConstraints = 1 + numScenarios * 3 + numScenarios; // 1 total land constraint + 3 constraints per scenario + 1 notdifferent constraint
+                double[,] lhsMatrix = new double[numConstraints, variables.Count];
+
+                // Total land constraint: x1 + x2 + x3 <= 500
+                lhsMatrix[0, variables.IndexOf("x_1")] = 1;
+                lhsMatrix[0, variables.IndexOf("x_2")] = 1;
+                lhsMatrix[0, variables.IndexOf("x_3")] = 1;
+
+                // Generate coefficients for each scenario
+                for (int s = 1; s <= numScenarios; s++)
+                {
+                    int row = 1 + (s - 1) * 3;
+
+                    // Generate uniformly distributed coefficients
+                    double[] x1Coeffs = GetUniformDistribution(2.5, 0.2, numScenarios);
+                    double[] x2Coeffs = GetUniformDistribution(3.0, 0.2, numScenarios);
+                    double[] x3Coeffs = GetUniformDistribution(20.0, 0.2, numScenarios);
+
+                    // Wheat constraint
+                    lhsMatrix[row, variables.IndexOf("x_1")] = -x1Coeffs[s - 1];
+                    lhsMatrix[row, variables.IndexOf($"y_1_{s}")] = -1;
+                    lhsMatrix[row, variables.IndexOf($"w_1_{s}")] = 1;
+
+                    // Corn constraint
+                    lhsMatrix[row + 1, variables.IndexOf("x_2")] = -x2Coeffs[s - 1];
+                    lhsMatrix[row + 1, variables.IndexOf($"y_2_{s}")] = -1;
+                    lhsMatrix[row + 1, variables.IndexOf($"w_2_{s}")] = 1;
+
+                    // Sugar constraint
+                    lhsMatrix[row + 2, variables.IndexOf("x_3")] = -x3Coeffs[s - 1];
+                    lhsMatrix[row + 2, variables.IndexOf($"w_3_{s}")] = 1;
+                    lhsMatrix[row + 2, variables.IndexOf($"w_4_{s}")] = 1;
+
+                    // w3 <= 6000 constraint
+                    int w3Row = 1 + numScenarios * 3 + (s - 1);
+                    lhsMatrix[w3Row, variables.IndexOf($"w_3_{s}")] = 1; // Coefficient of w3
+
+                }
+
+                return lhsMatrix;
+            }
+
+            static double[] GetUniformDistribution(double baseValue, double variability, int numScenarios)
+            {
+                // Generate uniformly distributed values across the range
+                double minValue = baseValue * (1 - variability);
+                double maxValue = baseValue * (1 + variability);
+                double step = (maxValue - minValue) / (numScenarios - 1);
+
+                double[] values = new double[numScenarios];
+                for (int i = 0; i < numScenarios; i++)
+                {
+                    values[i] = maxValue - i * step;
+                }
+                return values;
+            }
+
+
+            static double[] GenerateRhsMatrix(int numScenarios)
+            {
+                List<double> rhs = new List<double> { 500.0 }; // Total land constraint
+
+                for (int s = 1; s <= numScenarios; s++)
+                {
+                    rhs.Add(-200.0); // Wheat minimum constraint
+                    rhs.Add(-240.0); // Corn minimum constraint
+                    rhs.Add(0.0);    // Sugar constraint
+                }
+
+                for (int s = 1; s <= numScenarios; s++)
+                {
+                    rhs.Add(6000.0); // w3 <= 6000 constraint for each scenario
+                }
+
+                return rhs.ToArray();
+            }
+
+
+            // 3. Prompt the user to choose variables for the master problem
+            Console.WriteLine("\nEnter the variables to include in the master problem (e.g., x_1,x_2,x_3,w_1_1):");
+            string inputVariables = Console.ReadLine();
+
+            // Parse user input into a list of variable names
+            string[] masterVariables = inputVariables.Split(',');
+            Console.WriteLine("\nSelected variables for master problem:");
+            foreach (string variable in masterVariables)
+            {
+                Console.WriteLine(variable.Trim());
+            }
 
     }
 
