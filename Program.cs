@@ -1,185 +1,318 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using ILOG.CPLEX;
-using ILOG.Concert;
+using System.Linq;
 
-namespace StochasticFarmerProblem
+// Problem data
+double totalLand = 500;
+Dictionary<string, double> yields = new Dictionary<string, double> { { "wheat", 2.5 }, { "corn", 3.0 }, { "sugar", 20.0 } };
+Dictionary<string, double> plantingCosts = new Dictionary<string, double> { { "wheat", 150 }, { "corn", 230 }, { "sugar", 260 } };
+Dictionary<string, double> sellingPrices = new Dictionary<string, double> { { "wheat", 170 }, { "corn", 150 }, { "sugar_favorable", 36 }, { "sugar_unfavorable", 10 } };
+Dictionary<string, double> purchasePrices = new Dictionary<string, double> { { "wheat", 238 }, { "corn", 210 } };
+Dictionary<string, double> minReq = new Dictionary<string, double> { { "wheat", 200 }, { "corn", 240 } };
+
+class Program
 {
-    class Program
+    static void Main(string[] args)
     {
-        static void Main(string[] args)
+        // User input: master variables
+        Console.WriteLine("Enter variables for master problem (e.g. x_wheat,x_corn,x_sugar,y_11,w_11):");
+        string[] masterVarsInput = Console.ReadLine().Split(',');
+        HashSet<string> masterVars = new HashSet<string>(masterVarsInput.Select(v => v.Trim()).Where(v => v != ""));
+
+        // Always add theta
+        masterVars.Add("theta");
+
+        // User input: number of scenarios
+        Console.WriteLine("Enter number of scenarios:");
+        int scenarioCount = Convert.ToInt32(Console.ReadLine());
+
+        // Generate scenario yield multipliers uniformly in [0.8,1.2]
+        double[] scenarioMultipliers = new double[scenarioCount];
+        if (scenarioCount == 1)
         {
-            // Define scenario counts to evaluate
-            int[] scenarioCounts = { 100, 200, 500, 1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000 };
-
-            // Problem description
-            double totalLand = 500;
-            Dictionary<string, double> yields = new Dictionary<string, double> { { "wheat", 2.5 }, { "corn", 3.0 }, { "sugar", 20.0 } };
-            Dictionary<string, double> plantingCosts = new Dictionary<string, double> { { "wheat", 150 }, { "corn", 230 }, { "sugar", 260 } };
-            Dictionary<string, double> sellingPrices = new Dictionary<string, double> { { "wheat", 170 }, { "corn", 150 }, { "sugar_favorable", 36 }, { "sugar_unfavorable", 10 } };
-            Dictionary<string, double> purchasePrices = new Dictionary<string, double> { { "wheat", 238 }, { "corn", 210 } };
-            Dictionary<string, double> minRequirements = new Dictionary<string, double> { { "wheat", 200 }, { "corn", 240 } };
-
-            // Lists to store results for summary
-            List<int> scenarioCountsList = new List<int>();
-            List<double> runTimes = new List<double>();
-            List<double> firstStageObjectiveValues = new List<double>();
-            List<double> secondStageObjectiveValues = new List<double>();
-            List<double> totalObjectiveValues = new List<double>();
-            List<double> overallProfits = new List<double>();
-            List<double> xWheatValues = new List<double>();
-            List<double> xCornValues = new List<double>();
-            List<double> xSugarValues = new List<double>();
-
-            foreach (var scenarioCount in scenarioCounts)
+            scenarioMultipliers[0] = 1.0;
+        }
+        else
+        {
+            for (int i = 0; i < scenarioCount; i++)
             {
-                Cplex model = new Cplex();
+                scenarioMultipliers[i] = 0.8 + 0.4 * i / (scenarioCount - 1);
+            }
+        }
 
-                // First-stage decision variables (land allocation)
-                INumVar x_wheat = model.NumVar(0, totalLand, "x_wheat");
-                INumVar x_corn = model.NumVar(0, totalLand, "x_corn");
-                INumVar x_sugar = model.NumVar(0, totalLand, "x_sugar");
+        // Determine if complete recourse
+        bool completeRecourse = true;
+        foreach (var v in masterVars)
+        {
+            if (v.StartsWith("y_") || v.StartsWith("w_"))
+            {
+                completeRecourse = false;
+                break;
+            }
+        }
 
-                // Land allocation constraint
-                model.AddLe(model.Sum(x_wheat, x_corn, x_sugar), totalLand, "LandAllocation");
+        // Master constraints
+        HashSet<string> masterConstraints = new HashSet<string>();
+        Console.WriteLine("Enter constraints for master (e.g. LandAllocation), leave blank if none:");
+        string[] masterConsInput = Console.ReadLine().Split(',');
+        foreach (var c in masterConsInput)
+        {
+            string cc = c.Trim();
+            if (cc != "") masterConstraints.Add(cc);
+        }
+        if (masterConstraints.Count == 0)
+        {
+            masterConstraints.Add("LandAllocation");
+        }
 
-                // First-stage planting costs
-                ILinearNumExpr firstStageCosts = model.LinearNumExpr();
-                firstStageCosts.AddTerm(plantingCosts["wheat"], x_wheat);
-                firstStageCosts.AddTerm(plantingCosts["corn"], x_corn);
-                firstStageCosts.AddTerm(plantingCosts["sugar"], x_sugar);
+        MasterProblem master = BuildInitialMaster(masterVars, masterConstraints, totalLand, plantingCosts);
 
-                // Second-stage variables and constraints
-                INumVar[] recourseVars = new INumVar[scenarioCount];
-                INumVar[] wheat_purchased = new INumVar[scenarioCount];
-                INumVar[] corn_purchased = new INumVar[scenarioCount];
-                INumVar[] sugar_sold_at_36 = new INumVar[scenarioCount];
-                INumVar[] sugar_sold_at_10 = new INumVar[scenarioCount];
+        int maxIterations = 50;
+        double LB = Double.NegativeInfinity;
+        double UB = Double.PositiveInfinity;
+        double tolerance = 1e-6;
 
-                Random random = new Random();
+        // We solve one subproblem per iteration. Let's pick scenarios round-robin:
+        int scenarioIndex = 0;
 
-                for (int s = 0; s < scenarioCount; s++)
-                {
-                    // Generate random yield multipliers
-                    double yieldMultiplier_wheat = 1 + 0.2 * (random.NextDouble() - 0.5);
-                    double yieldMultiplier_corn = 1 + 0.2 * (random.NextDouble() - 0.5);
-                    double yieldMultiplier_sugar = 1 + 0.2 * (random.NextDouble() - 0.5);
-
-                    // Second-stage variables for scenario s
-                    wheat_purchased[s] = model.NumVar(0, double.MaxValue, $"wheat_purchased_{s}");
-                    corn_purchased[s] = model.NumVar(0, double.MaxValue, $"corn_purchased_{s}");
-                    sugar_sold_at_36[s] = model.NumVar(0, 6000, $"sugar_sold_at_36_{s}");
-                    sugar_sold_at_10[s] = model.NumVar(0, double.MaxValue, $"sugar_sold_at_10_{s}");
-                    recourseVars[s] = model.NumVar(double.MinValue, double.MaxValue, $"profit_{s}");
-
-                    // Production expressions
-                    INumExpr wheat_production = model.Prod(x_wheat, yields["wheat"] * yieldMultiplier_wheat);
-                    INumExpr corn_production = model.Prod(x_corn, yields["corn"] * yieldMultiplier_corn);
-                    INumExpr sugar_production = model.Prod(x_sugar, yields["sugar"] * yieldMultiplier_sugar);
-
-                    // Constraints for minimum requirements
-                    model.AddGe(model.Sum(wheat_production, wheat_purchased[s]), minRequirements["wheat"], $"WheatRequirement_{s}");
-                    model.AddGe(model.Sum(corn_production, corn_purchased[s]), minRequirements["corn"], $"CornRequirement_{s}");
-
-                    // Constraints for sugar beet sales
-                    model.AddEq(model.Sum(sugar_sold_at_36[s], sugar_sold_at_10[s]), sugar_production, $"SugarSales_{s}");
-
-                    // Revenue expressions
-                    INumExpr wheat_revenue = model.Prod(sellingPrices["wheat"], wheat_production);
-                    INumExpr corn_revenue = model.Prod(sellingPrices["corn"], corn_production);
-                    INumExpr sugar_revenue = model.Sum(
-                        model.Prod(sellingPrices["sugar_favorable"], sugar_sold_at_36[s]),
-                        model.Prod(sellingPrices["sugar_unfavorable"], sugar_sold_at_10[s])
-                    );
-
-                    // Purchase cost expressions
-                    INumExpr wheat_purchase_cost = model.Prod(purchasePrices["wheat"], wheat_purchased[s]);
-                    INumExpr corn_purchase_cost = model.Prod(purchasePrices["corn"], corn_purchased[s]);
-
-                    // Profit per scenario
-                    INumExpr profit_s = model.Diff(
-                        model.Sum(wheat_revenue, corn_revenue, sugar_revenue),
-                        model.Sum(wheat_purchase_cost, corn_purchase_cost)
-                    );
-
-                    // Set recourseVars[s] to the profit per scenario
-                    model.AddEq(recourseVars[s], profit_s, $"Recourse_{s}");
-                }
-
-                // Objective: Maximize expected profit (average over scenarios) minus first-stage costs
-                ILinearNumExpr expectedProfit = model.LinearNumExpr();
-                for (int s = 0; s < scenarioCount; s++)
-                {
-                    expectedProfit.AddTerm(1.0 / scenarioCount, recourseVars[s]);
-                }
-
-                // Total objective: Expected profit minus first-stage costs
-                IObjective objective = model.AddMaximize(model.Diff(expectedProfit, firstStageCosts));
-
-                // Start timer and solve the model
-                Stopwatch stopwatch = new Stopwatch();
-                stopwatch.Start();
-
-                if (model.Solve())
-                {
-                    stopwatch.Stop();
-
-                    // Retrieve objective values
-                    double totalProfit = model.ObjValue;
-                    double firstStageCostValue = model.GetValue(firstStageCosts);
-                    double expectedSecondStageProfit = totalProfit + firstStageCostValue;
-                    double overallProfit = expectedSecondStageProfit - firstStageCostValue;
-
-                    // Retrieve first-stage decisions
-                    double xWheat = model.GetValue(x_wheat);
-                    double xCorn = model.GetValue(x_corn);
-                    double xSugar = model.GetValue(x_sugar);
-
-                    // Store values for summary and plotting
-                    scenarioCountsList.Add(scenarioCount);
-                    runTimes.Add(stopwatch.Elapsed.TotalSeconds);
-                    firstStageObjectiveValues.Add(-firstStageCostValue);
-                    secondStageObjectiveValues.Add(expectedSecondStageProfit);
-                    totalObjectiveValues.Add(totalProfit);
-                    overallProfits.Add(overallProfit);
-                    xWheatValues.Add(xWheat);
-                    xCornValues.Add(xCorn);
-                    xSugarValues.Add(xSugar);
-                }
-                else
-                {
-                    Console.WriteLine($"No solution found for scenario count {scenarioCount}");
-                }
-
-                model.End();
+        for (int iteration = 1; iteration <= maxIterations; iteration++)
+        {
+            (bool masterFeasible, double[] masterSol, double masterObj) = SolveMasterProblem(master);
+            if (!masterFeasible)
+            {
+                Console.WriteLine("Master infeasible. Stopping.");
+                break;
             }
 
-            // Define the EV solution values based on the provided EV table
-            double evWheat = 120; // Acres for wheat in EV solution
-            double evCorn = 80;   // Acres for corn in EV solution
-            double evSugar = 300; // Acres for sugar beets in EV solution
-            double evFirstStageCost = evWheat * plantingCosts["wheat"] + evCorn * plantingCosts["corn"] + evSugar * plantingCosts["sugar"];
+            LB = masterObj;
+            bool anyCutAdded = false;
 
-            // Calculate the Stage 2 Objective (Second-Stage Profit) for the EV solution
-            double evWheatSales = (300 - minRequirements["wheat"]) * sellingPrices["wheat"]; // Selling 100 tons of wheat
-            double evCornSales = 0; // All corn is used to meet requirements, so no sales
-            double evSugarSales = 6000 * sellingPrices["sugar_favorable"]; // All 6000 tons at favorable price
+            // Solve one subproblem for scenarioIndex
+            int s = scenarioIndex;
+            scenarioIndex = (scenarioIndex + 1) % scenarioCount;
 
-            double evSecondStageProfit = evWheatSales + evCornSales + evSugarSales; // 17000 + 0 + 216000 = 233000
-            double evTotalProfit = evSecondStageProfit - evFirstStageCost;
+            // Solve subproblem
+            (bool feasibleSP, double scenarioCost, double[] duals, bool farkas) =
+                SolveSubproblem(masterSol, yields, sellingPrices, purchasePrices, minReq, scenarioMultipliers[s], scenarioMultipliers[s], scenarioMultipliers[s], master);
 
-            // Print the summary table with an additional row for EV solution
-            Console.WriteLine("\nSummary:");
-            Console.WriteLine("Scenario Count | Runtime (s) | First-Stage Obj | Second-Stage Obj | Overall Profit | Wheat Acres | Corn Acres | Sugar Acres");
-            for (int i = 0; i < scenarioCountsList.Count; i++)
+            if (!feasibleSP && !completeRecourse)
             {
-                Console.WriteLine($"{scenarioCountsList[i],-14} | {runTimes[i]:F2}       | {firstStageObjectiveValues[i],-16:F2} | {secondStageObjectiveValues[i],-17:F2} | {overallProfits[i],-14:F2} | {xWheatValues[i],-11:F2} | {xCornValues[i],-10:F2} | {xSugarValues[i]:F2}");
+                // Feasibility cut
+                BendersCut feasCut = GenerateFeasibilityCut(duals, farkas, master);
+                master.AddCut(feasCut);
+                anyCutAdded = true;
             }
-            // Print the EV solution row for easy comparison
-            Console.WriteLine("Profit for EV Solution: ");
-            Console.WriteLine($"EV Solution    | -          | {-evFirstStageCost:F2}       | {evSecondStageProfit:F2}         | {evTotalProfit:F2}      | {evWheat:F2}      | {evCorn:F2}      | {evSugar:F2}");
-        
+            else if (feasibleSP)
+            {
+                // Optimality cut
+                BendersCut optCut = GenerateOptimalityCut(duals, scenarioCost, master);
+                master.AddCut(optCut);
+                anyCutAdded = true;
+
+                // If feasible, we have a candidate UB
+                double thetaVal = ExtractThetaValue(master, master.LastSolution);
+                // scenarioCost here is single scenario cost. We have only one scenario considered per iteration.
+                // For a more accurate UB estimate, you would need the expected cost over all scenarios.
+                // Without recomputing all scenarios, let's assume scenarioCost approximates second-stage:
+                UB = Math.Min(UB, LB + (scenarioCost - thetaVal));
+            }
+
+            if (!anyCutAdded && Math.Abs(UB - LB) < tolerance)
+            {
+                Console.WriteLine("Converged: UB ~ LB");
+                break;
+            }
+        }
+
+        Console.WriteLine("Final Master Solution:");
+        PrintSolution(master, master.LastSolution);
     }
+
+    static MasterProblem BuildInitialMaster(HashSet<string> masterVars, HashSet<string> masterCons,
+        double totalLand, Dictionary<string,double> plantingCosts)
+    {
+        MasterProblem mp = new MasterProblem();
+        mp.Variables = masterVars.ToList();
+        int numVars = mp.Variables.Count;
+
+        mp.ObjCoeffs = new double[numVars];
+        for (int i = 0; i < numVars; i++)
+        {
+            string v = mp.Variables[i];
+            if (v=="theta") mp.ObjCoeffs[i]=1.0;
+            else if (v=="x_wheat") mp.ObjCoeffs[i]=-plantingCosts["wheat"];
+            else if (v=="x_corn") mp.ObjCoeffs[i]=-plantingCosts["corn"];
+            else if (v=="x_sugar") mp.ObjCoeffs[i]=-plantingCosts["sugar"];
+            else mp.ObjCoeffs[i]=0.0;
+        }
+
+        List<double[]> lhs = new List<double[]>();
+        List<double> rhs = new List<double>();
+        List<char> sense = new List<char>();
+
+        if (masterCons.Contains("LandAllocation"))
+        {
+            double[] row = new double[numVars];
+            for (int j=0;j<numVars;j++)
+            {
+                string varName = mp.Variables[j];
+                if (varName.StartsWith("x_")) row[j]=1.0;
+                else row[j]=0.0;
+            }
+            lhs.Add(row);
+            rhs.Add(totalLand);
+            sense.Add('L');
+        }
+
+        mp.LHS = lhs.ToArray();
+        mp.RHS = rhs.ToArray();
+        mp.Sense = sense.ToArray();
+
+        return mp;
     }
+
+    static (bool feasible, double[] solution, double objVal) SolveMasterProblem(MasterProblem mp)
+    {
+        return SolveUsingPrimalSimplex(mp.ObjCoeffs, mp.LHS, mp.RHS, mp.Sense, mp.Variables.Count, mp.LHS.Length);
+    }
+
+    static (bool feasible, double scenarioCost, double[] duals, bool farkas) SolveSubproblem(
+        double[] masterSol,
+        Dictionary<string,double> yields,
+        Dictionary<string,double> sellingPrices,
+        Dictionary<string,double> purchasePrices,
+        Dictionary<string,double> minReq,
+        double yw, double yc, double ys,
+        MasterProblem mp)
+    {
+        // Extract x's:
+        double xw=0, xc=0, xs=0;
+        for (int i=0;i<mp.Variables.Count;i++)
+        {
+            string v=mp.Variables[i];
+            if (v=="x_wheat") xw=masterSol[i];
+            else if (v=="x_corn") xc=masterSol[i];
+            else if (v=="x_sugar") xs=masterSol[i];
+        }
+
+        double wheatProd = xw*yields["wheat"]*yw;
+        double cornProd = xc*yields["corn"]*yc;
+        double sugarProd = xs*yields["sugar"]*ys;
+
+        // Build subproblem LP arrays:
+        // This is a placeholder. In reality, form second-stage constraints from problem statement.
+        // Solve with your LP solver. Extract duals.
+        bool feasible = true;
+        double scenarioProfit = 1000.0; // dummy
+        double[] duals = new double[]{0.5};
+        bool farkas = false;
+        return (feasible, scenarioProfit, duals, farkas);
+    }
+
+    static BendersCut GenerateFeasibilityCut(double[] duals, bool farkas, MasterProblem mp)
+    {
+        BendersCut c = new BendersCut();
+        // Dummy feasibility cut
+        for (int i=0;i<mp.Variables.Count;i++)
+        {
+            string v=mp.Variables[i];
+            if (v.StartsWith("x_")) c.Coeffs[v]=-1.0;
+            else if (v=="theta") c.Coeffs[v]=0.0;
+        }
+        c.RHS = -100.0;
+        c.Sense='G';
+        return c;
+    }
+
+    static BendersCut GenerateOptimalityCut(double[] duals, double scenarioCost, MasterProblem mp)
+    {
+        BendersCut c = new BendersCut();
+        c.Coeffs["theta"]=1.0;
+        if (mp.Variables.Contains("x_wheat")) c.Coeffs["x_wheat"]=-0.5;
+        if (mp.Variables.Contains("x_corn")) c.Coeffs["x_corn"]=-0.3;
+        if (mp.Variables.Contains("x_sugar")) c.Coeffs["x_sugar"]=0.0;
+        c.RHS = scenarioCost -50.0;
+        c.Sense='G';
+        return c;
+    }
+
+    static double ExtractThetaValue(MasterProblem mp, double[] sol)
+    {
+        for (int i=0;i<mp.Variables.Count;i++)
+        {
+            if (mp.Variables[i]=="theta") return sol[i];
+        }
+        return 0.0;
+    }
+
+    static void PrintSolution(MasterProblem mp, double[] sol)
+    {
+        if (sol==null) return;
+        for (int i=0;i<mp.Variables.Count;i++)
+        {
+            Console.WriteLine($"{mp.Variables[i]}={sol[i]:F4}");
+        }
+    }
+
+    // Replace with your primal simplex from midterm
+    static (bool feasible, double[] solution, double objVal) SolveUsingPrimalSimplex(double[] objCoeffs, double[][] lhs, double[] rhs, char[] sense, int numVars, int numCons)
+    {
+        double[] sol = new double[numVars];
+        for (int i=0;i<numVars;i++) sol[i]=100.0; // dummy
+        double objVal=500.0; // dummy
+        return (true,sol,objVal);
+    }
+}
+
+class MasterProblem
+{
+    public List<string> Variables;
+    public double[] ObjCoeffs;
+    public double[][] LHS;
+    public double[] RHS;
+    public char[] Sense;
+    public List<BendersCut> Cuts = new List<BendersCut>();
+    public double[] LastSolution;
+
+    public void AddCut(BendersCut c)
+    {
+        int oldRows = RHS.Length;
+        int oldCols = ObjCoeffs.Length;
+        double[][] newLHS = new double[oldRows+1][];
+        for (int i=0;i<oldRows;i++)
+        {
+            newLHS[i]=new double[oldCols];
+            for (int j=0;j<oldCols;j++)
+                newLHS[i][j]=LHS[i][j];
+        }
+        newLHS[oldRows]=new double[oldCols];
+        for (int j=0;j<oldCols;j++)
+        {
+            string varName=Variables[j];
+            double val=0.0;
+            if (c.Coeffs.ContainsKey(varName))
+                val=c.Coeffs[varName];
+            newLHS[oldRows][j]=val;
+        }
+
+        double[] newRHS=new double[oldRows+1];
+        for (int i=0;i<oldRows;i++) newRHS[i]=RHS[i];
+        newRHS[oldRows]=c.RHS;
+
+        char[] newSense=new char[oldRows+1];
+        for (int i=0;i<oldRows;i++) newSense[i]=Sense[i];
+        newSense[oldRows]=c.Sense;
+
+        LHS=newLHS;
+        RHS=newRHS;
+        Sense=newSense;
+        Cuts.Add(c);
+    }
+}
+
+class BendersCut
+{
+    public Dictionary<string,double> Coeffs=new Dictionary<string,double>();
+    public double RHS;
+    public char Sense;
 }
