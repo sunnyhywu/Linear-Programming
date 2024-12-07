@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.Diagnostics;
 
-
 namespace StochasticFarmerProblem
 {
     class BendersDecomposition
@@ -31,13 +30,116 @@ namespace StochasticFarmerProblem
 
             // 3. Construct the objective coefficient matrix
             double[] objectiveCoefficients = BuildObjectiveCoefficients(allVariables, numScenarios);
+            // Generate LHS matrix with coefficients varying by uniform distribution
+            double[,] lhsMatrix = GenerateLhsMatrix(allVariables, numScenarios);
+            double[] rhsMatrix = GenerateRhsMatrix(numScenarios);
 
-            // Display the objective coefficients
-            Console.WriteLine("\nObjective Coefficient Matrix:");
-            for (int i = 0; i < allVariables.Count; i++)
+            // 4. Prompt the user to choose variables for the master problem
+            Console.WriteLine("\nEnter the variables to include in the master problem (e.g., x_1,x_2,x_3,w_1_1):");
+            string inputVariables = Console.ReadLine();
+            // Parse user input into a list of variable names
+            string[] masterVariables = inputVariables.Split(',');
+            Console.WriteLine("\nSelected variables for master problem:");
+            foreach (string variable in masterVariables)
             {
-                Console.WriteLine($"{allVariables[i]}: {objectiveCoefficients[i]}");
+                Console.WriteLine(variable.Trim());
             }
+
+            // 5. Extract Master and Subproblem data
+            var (masterCoefficients, subproblemCoefficients, masterLhs, masterRhs, subproblemLhs, subproblemRhs) =
+                ExtractMasterAndSubproblemData(
+                    allVariables,
+                    objectiveCoefficients,
+                    lhsMatrix,
+                    rhsMatrix,
+                    masterVariables);
+
+                static (double[,] masterCoefficientsMatrix, double[,] subproblemCoefficientsMatrix, double[,] masterLhs, double[] masterRhs, double[,] subproblemLhs, double[] subproblemRhs)
+                ExtractMasterAndSubproblemData(
+                 List<string> allVariables, double[] objectiveCoefficients, double[,] lhsMatrix, double[] rhsMatrix, string[] masterVariables)
+                  {
+                var masterCoefficientsMatrix = new double[objectiveCoefficients.Length, 1];
+                var subproblemCoefficientsMatrix = new double[objectiveCoefficients.Length, 1];
+                var masterSet = new HashSet<string>(masterVariables.Select(s => s.Trim()));
+
+                for (int i = 0; i < allVariables.Count; i++)
+                {
+                    //Console.WriteLine($"Processing index {i}, allVariables[i]: '{allVariables[i]}', objectiveCoefficients[i]: {objectiveCoefficients[i]}");
+
+                    if (masterSet.Contains(allVariables[i]))
+                    {
+                        masterCoefficientsMatrix[i, 0] = objectiveCoefficients[i];
+                        subproblemCoefficientsMatrix[i, 0] = 0.0;
+                        Console.WriteLine($"Matched Master Variable: {allVariables[i]}");
+                    }
+                    else
+                    {
+                        subproblemCoefficientsMatrix[i, 0] = objectiveCoefficients[i];
+                        masterCoefficientsMatrix[i, 0] = 0.0;
+                        Console.WriteLine($"Matched Subproblem Variable: {allVariables[i]}");
+
+                    }
+                }
+
+                // Extract master LHS and RHS only for master variables
+                var masterSelectedRows = new List<int>(); // Master 限制式行索引
+                var subproblemSelectedRows = new List<int>(); // Subproblem 限制式行索引
+
+                for (int i = 0; i < lhsMatrix.GetLength(0); i++) // 遍歷所有限制式行
+                {
+                    bool isMasterRow = true;
+
+                    for (int j = 0; j < lhsMatrix.GetLength(1); j++) // 遍歷行中所有變數
+                    {
+                        // 如果 LHS 行中存在非零係數，但變數不屬於 Master Variables，則該行不屬於 Master Problem
+                        if (lhsMatrix[i, j] != 0 && !masterVariables.Contains(allVariables[j]))
+                        {
+                            isMasterRow = false;
+                            break;
+                        }
+                    }
+
+                    if (isMasterRow)
+                    {
+                        masterSelectedRows.Add(i);
+                    }
+                    else
+                    {
+                        subproblemSelectedRows.Add(i);
+                    }
+                }
+
+                // 構建 Master Problem 的 LHS 和 RHS
+                double[,] masterLhs = new double[masterSelectedRows.Count, lhsMatrix.GetLength(1)];
+                double[] masterRhs = new double[masterSelectedRows.Count];
+
+                for (int i = 0; i < masterSelectedRows.Count; i++)
+                {
+                    int rowIndex = masterSelectedRows[i];
+                    for (int j = 0; j < lhsMatrix.GetLength(1); j++)
+                    {
+                        masterLhs[i, j] = lhsMatrix[rowIndex, j];
+                    }
+                    masterRhs[i] = rhsMatrix[rowIndex];
+                }
+
+                // 構建 Subproblem 的 LHS 和 RHS
+                double[,] subproblemLhs = new double[subproblemSelectedRows.Count, lhsMatrix.GetLength(1)];
+                double[] subproblemRhs = new double[subproblemSelectedRows.Count];
+
+                for (int i = 0; i < subproblemSelectedRows.Count; i++)
+                {
+                    int rowIndex = subproblemSelectedRows[i];
+                    for (int j = 0; j < lhsMatrix.GetLength(1); j++)
+                    {
+                        subproblemLhs[i, j] = lhsMatrix[rowIndex, j];
+                    }
+                    subproblemRhs[i] = rhsMatrix[rowIndex];
+                }
+
+                return (masterCoefficientsMatrix, subproblemCoefficientsMatrix, masterLhs, masterRhs, subproblemLhs, subproblemRhs);
+            }
+
 
             static double[] BuildObjectiveCoefficients(List<string> variables, int numScenarios)
             {
@@ -50,7 +152,7 @@ namespace StochasticFarmerProblem
                     allcoefficients[$"w_1_{s}"] = -170.0 / numScenarios;
                     allcoefficients[$"w_2_{s}"] = -150.0 / numScenarios;
                     allcoefficients[$"w_3_{s}"] = -36.0 / numScenarios;
-                    allcoefficients[$"w_3_{s}"] = -10.0 / numScenarios;
+                    allcoefficients[$"w_4_{s}"] = -10.0 / numScenarios;
                     allcoefficients[$"y_1_{s}"] = 238.0 / numScenarios;
                     allcoefficients[$"y_2_{s}"] = 210.0 / numScenarios;
                 }
@@ -64,27 +166,6 @@ namespace StochasticFarmerProblem
                 return result;
             }
 
-            // 3. Generate LHS matrix with coefficients varying by uniform distribution
-            double[,] lhsMatrix = GenerateLhsMatrix(allVariables, numScenarios);
-            double[] rhsMatrix = GenerateRhsMatrix(numScenarios);
-
-            // Display the LHS matrix
-            Console.WriteLine("\nLHS Matrix (Constraint Coefficients):");
-            for (int i = 0; i < lhsMatrix.GetLength(0); i++)
-            {
-                for (int j = 0; j < lhsMatrix.GetLength(1); j++)
-                {
-                    Console.Write($"{lhsMatrix[i, j],8:F2} ");
-                }
-                Console.WriteLine();
-            }
-
-            // Display the RHS matrix
-            Console.WriteLine("\nRHS Matrix:");
-            foreach (var rhs in rhsMatrix)
-            {
-                Console.WriteLine($"{rhs:F2}");
-            }
 
             static List<string> GenerateVariables(int numScenarios)
             {
@@ -169,7 +250,6 @@ namespace StochasticFarmerProblem
                 return values;
             }
 
-
             static double[] GenerateRhsMatrix(int numScenarios)
             {
                 List<double> rhs = new List<double> { 500.0 }; // Total land constraint
@@ -190,17 +270,81 @@ namespace StochasticFarmerProblem
             }
 
 
-            // 3. Prompt the user to choose variables for the master problem
-            Console.WriteLine("\nEnter the variables to include in the master problem (e.g., x_1,x_2,x_3,w_1_1):");
-            string inputVariables = Console.ReadLine();
-
-            // Parse user input into a list of variable names
-            string[] masterVariables = inputVariables.Split(',');
-            Console.WriteLine("\nSelected variables for master problem:");
-            foreach (string variable in masterVariables)
+            //============print  to check the mastercoeff, masterLhs,  masterRhs, subproblemCoeff===============
+            // Display the objective coefficients
+            Console.WriteLine("\nObjective Coefficient Matrix:");
+            for (int i = 0; i < allVariables.Count; i++)
             {
-                Console.WriteLine(variable.Trim());
+                Console.WriteLine($"{allVariables[i]}: {objectiveCoefficients[i]}");
             }
+
+            // Display the LHS matrix
+            Console.WriteLine("\nLHS Matrix (Constraint Coefficients):");
+            for (int i = 0; i < lhsMatrix.GetLength(0); i++)
+            {
+                for (int j = 0; j < lhsMatrix.GetLength(1); j++)
+                {
+                    Console.Write($"{lhsMatrix[i, j],8:F2} ");
+                }
+                Console.WriteLine();
+            }
+
+            // Display the RHS matrix
+            Console.WriteLine("\nRHS Matrix:");
+            foreach (var rhs in rhsMatrix)
+            {
+                Console.WriteLine($"{rhs:F2}");
+            }
+
+
+            // Display Master Information
+            Console.WriteLine("\nMaster Problem Coefficients:");
+            for (int i = 0; i < masterCoefficients.GetLength(0); i++)
+            {
+                Console.Write($"{masterCoefficients[i, 0],8:F2} ");
+            }
+
+            Console.WriteLine("\nMaster LHS Matrix:");
+            for (int i = 0; i < masterLhs.GetLength(0); i++)
+            {
+                for (int j = 0; j < masterLhs.GetLength(1); j++)
+                {
+                    Console.Write($"{masterLhs[i, j],8:F2} ");
+                }
+                Console.WriteLine();
+            }
+
+            Console.WriteLine("\nMaster RHS Matrix:");
+            foreach (var rhs in masterRhs)
+            {
+                Console.WriteLine($"{rhs:F2}");
+            }
+
+            
+            Console.WriteLine("\nSubproblem Coefficients:");
+            for (int i = 0; i < subproblemCoefficients.GetLength(0); i++)
+            {
+                Console.Write($"{subproblemCoefficients[i,0],8:F2}");
+            }
+
+
+            Console.WriteLine("\nSubproblem LHS Matrix:");
+            for (int i = 0; i < subproblemLhs.GetLength(0); i++)
+            {
+                for (int j = 0; j < subproblemLhs.GetLength(1); j++)
+                {
+                    Console.Write($"{subproblemLhs[i,j],8:F2} ");
+                }
+                Console.WriteLine();
+            }
+            
+            Console.WriteLine("\nSubproblem RHS Matrix:");
+            foreach (var rhs in subproblemRhs)
+            {
+                Console.WriteLine($"{rhs:F2}");
+            }
+
+        }
 
     }
 
