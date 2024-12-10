@@ -1,0 +1,292 @@
+class LShapedMethod
+{
+    private int r = 0, s = 0, v = 0; // Counters for feasibility and optimality cuts
+    private double theta = double.NegativeInfinity; // Initial theta value
+    private double upperBound = double.MaxValue; // Initial upper bound
+    private double lowerBound = -double.MaxValue; // Initial lower bound
+    private int numVariables = 3; // Number of decision variables
+    private int numScenarios = 5; // Number of scenarios
+    private double[] P; // Probabilities P_k for scenarios
+    private INumVar[] x; // Decision variables in the master problem
+    private INumVar thetaVar; // Theta variable in the master problem
+    private Cplex masterProblem;
+    private Cplex subProblem;
+
+    // Scenario data
+    private double[][] T; // Coefficients T_k for scenarios
+    private double[][] h; // RHS coefficients h_k for scenarios
+
+    public LShapedMethod()
+    {
+        Initialize();
+        InitializeData();
+        InitializeMasterProblem();
+    }
+
+    private void Initialize()
+    {
+        Console.WriteLine("Step 0: Initialization");
+        masterProblem = new Cplex();
+        subProblem = new Cplex();
+        Console.WriteLine("CPLEX models initialized.");
+    }
+
+    private void InitializeData()
+    {
+        // Problem parameters
+        numVariables = 3; // x_wheat, x_corn, x_sugar
+        P = new double[numScenarios];
+        T = new double[numScenarios][];
+        h = new double[numScenarios][];
+
+        double[] plantingCosts = { 150, 230, 260 }; // Cost coefficients for first stage
+        double[] minRequirements = { 200, 240 }; // Minimum requirements for wheat, corn
+
+        Random random = new Random();
+
+        for (int k = 0; k < numScenarios; k++)
+        {
+            P[k] = 1.0 / numScenarios; // Equal probability for simplicity
+
+            // Generate random yield multipliers
+            double yieldMultiplierWheat = 1 + 0.2 * (random.NextDouble() - 0.5);
+            double yieldMultiplierCorn = 1 + 0.2 * (random.NextDouble() - 0.5);
+            double yieldMultiplierSugar = 1 + 0.2 * (random.NextDouble() - 0.5);
+
+            // First-stage planting costs as coefficients for T_k
+            T[k] = plantingCosts;
+
+            // RHS values incorporate random yields and minimum requirements
+            h[k] = new double[]
+            {
+            minRequirements[0] / yieldMultiplierWheat, // Adjusted requirement for wheat
+            minRequirements[1] / yieldMultiplierCorn,  // Adjusted requirement for corn
+            0                                         // Placeholder for sugar constraint
+            };
+        }
+
+        Console.WriteLine($"Data initialized with {numVariables} variables and {numScenarios} scenarios.");
+    }
+
+
+
+    private void InitializeMasterProblem()
+    {
+        Console.WriteLine("Initializing master problem...");
+
+        // Initialize first-stage decision variables
+        x = masterProblem.NumVarArray(numVariables, 0, double.MaxValue);
+        thetaVar = masterProblem.NumVar(double.NegativeInfinity, double.MaxValue, "theta");
+
+        // Add objective function
+        ILinearNumExpr objective = masterProblem.LinearNumExpr();
+        for (int i = 0; i < numVariables; i++)
+        {
+            objective.AddTerm(1.0, x[i]); // Replace 1.0 with planting costs or actual coefficients
+        }
+        objective.AddTerm(1.0, thetaVar); // Include theta variable
+        masterProblem.AddMinimize(objective);
+
+        Console.WriteLine("Master problem initialized with variables and objective.");
+    }
+
+
+    public void Solve()
+    {
+        while ((upperBound - lowerBound) / upperBound > 0.01) // Convergence criterion: relative gap < 0.01
+        {
+            Console.WriteLine($"Iteration {v + 1}: Gap = {(upperBound - lowerBound) / upperBound}");
+            SolveMasterProblem();
+        }
+        Console.WriteLine("Optimal solution found.");
+        Console.WriteLine($"Upper Bound: {upperBound}");
+        Console.WriteLine($"Lower Bound: {lowerBound}");
+    }
+
+    private void SolveMasterProblem()
+    {
+        Console.WriteLine("Step 1: Solving the master problem");
+        v++; // Increment iteration count
+
+        try
+        {
+            if (masterProblem.Solve())
+            {
+                Console.WriteLine($"Master problem solved. Objective value: {masterProblem.ObjValue}");
+                double[] xOptimal = masterProblem.GetValues(x);
+                double thetaV = masterProblem.GetValue(thetaVar);
+
+                // Update upper bound
+                upperBound = Math.Min(upperBound, masterProblem.ObjValue);
+
+                if (!IsFeasible(xOptimal))
+                {
+                    AddFeasibilityCuts(xOptimal);
+                }
+                else
+                {
+                    CheckOptimalityAndAddCut(xOptimal, thetaV);
+                }
+            }
+            else
+            {
+                Console.WriteLine("Master problem not solvable.");
+            }
+        }
+        catch (ILOG.Concert.Exception ex)
+        {
+            Console.WriteLine($"CPLEX Exception: {ex.Message}");
+        }
+    }
+
+    private bool IsFeasible(double[] xOptimal)
+    {
+        Console.WriteLine("Checking feasibility...");
+        for (int k = 1; k <= numScenarios; k++)
+        {
+            subProblem.ClearModel();
+
+            // Define subproblem variables
+            INumVar[] y = subProblem.NumVarArray(numVariables, 0, double.MaxValue);
+            INumVar[] vPlus = subProblem.NumVarArray(numVariables, 0, double.MaxValue);
+            INumVar[] vMinus = subProblem.NumVarArray(numVariables, 0, double.MaxValue);
+
+            // Objective: Minimize the sum of slack/surplus variables
+            ILinearNumExpr subObjective = subProblem.LinearNumExpr();
+            foreach (var vp in vPlus) subObjective.AddTerm(1.0, vp);
+            foreach (var vm in vMinus) subObjective.AddTerm(1.0, vm);
+            subProblem.AddMinimize(subObjective);
+
+            // Add constraints
+            ILinearNumExpr constraint = subProblem.LinearNumExpr();
+            double[] Tk = GetTkForScenario(k);
+            double[] hk = GetHkForScenario(k);
+
+            for (int i = 0; i < numVariables; i++)
+            {
+                constraint.AddTerm(1.0, y[i]);
+                constraint.AddTerm(1.0, vPlus[i]);
+                constraint.AddTerm(-1.0, vMinus[i]);
+            }
+
+            double rhs = hk[0] - DotProduct(Tk, xOptimal);
+            subProblem.AddEq(constraint, rhs);
+
+            if (subProblem.Solve() && subProblem.ObjValue > 0)
+            {
+                Console.WriteLine($"Solution is infeasible for scenario {k}.");
+                return false;
+            }
+        }
+
+        Console.WriteLine("Solution is feasible for all scenarios.");
+        return true;
+    }
+
+    private void AddFeasibilityCuts(double[] xOptimal)
+    {
+        Console.WriteLine("Step 2: Adding feasibility cuts...");
+        for (int k = 1; k <= numScenarios; k++)
+        {
+            subProblem.ClearModel();
+            IRange[] constraints = GetSubproblemConstraints(k);
+
+            if (subProblem.Solve() && subProblem.ObjValue > 0)
+            {
+                double[] dualVariables = ExtractDualVariablesForScenario(k);
+                ILinearNumExpr feasibilityCut = masterProblem.LinearNumExpr();
+
+                for (int i = 0; i < numVariables; i++)
+                {
+                    feasibilityCut.AddTerm(dualVariables[i], x[i]);
+                }
+
+                double dr = DotProduct(dualVariables, GetHkForScenario(k));
+                masterProblem.AddGe(feasibilityCut, dr);
+                Console.WriteLine($"Feasibility cut added for scenario {k}.");
+            }
+        }
+    }
+
+    private void CheckOptimalityAndAddCut(double[] xOptimal, double thetaV)
+    {
+        Console.WriteLine("Step 3: Checking optimality and adding cuts...");
+
+        double Es = 0, es = 0;
+        for (int k = 1; k <= numScenarios; k++)
+        {
+            double[] piVk = ExtractDualVariablesForScenario(k);
+            double Pk = GetProbabilityOfScenario(k);
+            double[] Tk = GetTkForScenario(k);
+            double[] hk = GetHkForScenario(k);
+
+            Es += Pk * DotProduct(piVk, Tk);
+            es += Pk * DotProduct(piVk, hk);
+        }
+
+        double wv = es - DotProduct(xOptimal, new double[] { Es });
+
+        if (thetaV >= wv)
+        {
+            lowerBound = Math.Max(lowerBound, thetaV);
+        }
+        else
+        {
+            ILinearNumExpr optimalityCut = masterProblem.LinearNumExpr();
+            for (int i = 0; i < x.Length; i++)
+            {
+                optimalityCut.AddTerm(Es, x[i]);
+            }
+            masterProblem.AddGe(optimalityCut, es);
+            Console.WriteLine("Optimality cut added.");
+        }
+    }
+
+    private IRange[] GetSubproblemConstraints(int scenario)
+    {
+        Console.WriteLine($"Defining constraints for subproblem of scenario {scenario}...");
+        double[] Tk = GetTkForScenario(scenario);
+        double[] hk = GetHkForScenario(scenario);
+
+        List<IRange> constraints = new List<IRange>();
+        for (int i = 0; i < numVariables; i++)
+        {
+            ILinearNumExpr expr = subProblem.LinearNumExpr();
+            expr.AddTerm(1.0, subProblem.NumVarArray(numVariables, 0, double.MaxValue)[i]);
+            constraints.Add(subProblem.AddEq(expr, hk[i] - Tk[i]));
+        }
+
+        return constraints.ToArray();
+    }
+
+    private double[] ExtractDualVariablesForScenario(int scenario)
+    {
+        IRange[] constraints = GetSubproblemConstraints(scenario);
+        double[] duals = new double[constraints.Length];
+        for (int i = 0; i < constraints.Length; i++)
+        {
+            duals[i] = subProblem.GetDual(constraints[i]);
+        }
+        return duals;
+    }
+
+    private double GetProbabilityOfScenario(int scenario) => P[scenario - 1];
+    private double[] GetTkForScenario(int scenario) => T[scenario - 1];
+    private double[] GetHkForScenario(int scenario) => h[scenario - 1];
+
+    private double DotProduct(double[] vector1, double[] vector2)
+    {
+        double result = 0;
+        for (int i = 0; i < vector1.Length; i++)
+        {
+            result += vector1[i] * vector2[i];
+        }
+        return result;
+    }
+
+    static void Main(string[] args)
+    {
+        LShapedMethod lshaped = new LShapedMethod();
+        lshaped.Solve();
+    }
+}
