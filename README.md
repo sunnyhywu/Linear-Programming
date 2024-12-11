@@ -1,4 +1,9 @@
 # Linear-Programming
+12/11
+Add dual funaction and have duals in SolveUsingPrimalSimplexSubproblem
+
+
+
 
 12/7
 我目前完成
