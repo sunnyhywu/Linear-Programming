@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -570,6 +570,12 @@ namespace StochasticFarmerProblem
             double[] solution = new double[totalVars];
             double[] duals = new double[numCons];
 
+
+            var dualResult = SolveUsingDualSimplex(lhs, rhs, objCoeffs, totalVars, numCons);
+            duals = dualResult.solution; // 提取 solution 部分作為 duals
+            objVal = dualResult.objVal;
+            feasible = dualResult.feasible;
+
             // Implement full simplex steps here:
             // If infeasible, set feasible=false, farkas=true, duals=FarkasRay
             // If optimal and feasible, duals = constraint dual prices.
@@ -577,6 +583,134 @@ namespace StochasticFarmerProblem
             // After solving:
             return (feasible, objVal, duals, farkas);
         }
+
+        // Solve Using Dual Simplex Method
+       static (bool feasible, double[] solution, double objVal) 
+           SolveUsingDualSimplex(double[,] lhs, double[] rhs, double[] objCoeffs, int totalVars, int numCons)
+       {
+           bool feasible = true;
+           double[] solution = new double[totalVars];
+           for (int i = 0; i < totalVars; i++)
+               solution[i] = 0.0;
+
+           // Initialize basic variables (slack variables)
+           int[] basicVariables = new int[numCons];
+           for (int i = 0; i < numCons; i++)
+           {
+               basicVariables[i] = totalVars - numCons + i; // Indices of slack variables
+           }
+
+           bool optimal = false;
+           while (!optimal)
+           {
+
+               // Identify leaving variable (most negative rhs)
+               int leavingVarIndex = -1;
+               double mostNegativeRHS = 0;
+               for (int i = 0; i < numCons; i++)
+               {
+                   if (rhs[i] < mostNegativeRHS)
+                   {
+                       mostNegativeRHS = rhs[i];
+                       leavingVarIndex = i;
+                   }
+               }
+
+               // If no leaving variable is found, the solution is optimal
+               if (leavingVarIndex == -1)
+               {
+                   // Optimal
+                   optimal = true;
+                   break;
+               }
+
+               // Compute ratios for entering variable selection
+               int enteringVarIndex = -1;
+               double minRatio = double.MaxValue;
+               for (int j = 0; j < totalVars; j++)
+               {
+                   if (lhs[leavingVarIndex, j] < 0)
+                   {
+                       double reducedCost = objCoeffs[j]; ;
+                       for (int i = 0; i < numCons; i++)
+                       {
+                           reducedCost -= objCoeffs[basicVariables[i]] * lhs[i, j];
+                       }
+                       double ratio = reducedCost / lhs[leavingVarIndex, j];
+                       if (ratio < minRatio)
+                       {
+                           minRatio = ratio;
+                           enteringVarIndex = j;
+                       }
+                   }
+               }
+
+               // If no entering variable is found, problem is infeasible
+               if (enteringVarIndex == -1)
+               {
+                   // Unbounded
+                   feasible = false;
+                   return (feasible, null, double.PositiveInfinity);
+               }
+
+               // Perform pivot operation
+               double pivotElement = lhs[leavingVarIndex, enteringVarIndex];
+
+               // Update the leaving row
+               for (int j = 0; j < totalVars; j++)
+               {
+                   lhs[leavingVarIndex, j] /= pivotElement;
+               }
+               rhs[leavingVarIndex] /= pivotElement;
+
+               // Update all other rows
+               for (int i = 0; i < numCons; i++)
+               {
+                   if (i != leavingVarIndex)
+                   {
+                       double factor = lhs[i, enteringVarIndex];
+                       for (int j = 0; j < totalVars; j++)
+                       {
+                           lhs[i, j] -= factor * lhs[leavingVarIndex, j];
+                       }
+                       rhs[i] -= factor * rhs[leavingVarIndex];
+                   }
+               }
+
+               // Update the objective coefficients
+               double objectiveFactor = objCoeffs[enteringVarIndex];
+               for (int j = 0; j < totalVars; j++)
+               {
+                   objCoeffs[j] -= objectiveFactor * lhs[leavingVarIndex, j];
+               }
+
+               // Update the basic variable index
+               basicVariables[leavingVarIndex] = enteringVarIndex;
+
+           }
+           // Compute solution from final tableau
+           HashSet<int> basicSet = new HashSet<int>(basicVariables);
+           for (int i = 0; i < numCons; i++)
+           {
+               solution[basicVariables[i]] = rhs[i];
+           }
+           // Compute objective value
+           double objVal = 0.0;
+           for (int j = 0; j < totalVars; j++)
+               objVal += solution[j] * objCoeffs[j]; // objCoeffs now shifted; better keep original copy before simplex if needed
+
+           return (feasible, solution, objVal);
+
+       }
+
+
+
+
+
+
+
+
+
 
     }
 }
