@@ -1,9 +1,17 @@
 # Linear-Programming
+12/12
+Modify矩陣數字的順序+學妹加上去的版本 in old_version.cs
+
+[x_1,x_2,x_3,y_1_1,y_2_1,y_1_2,y_2_2,y_1_3,y_2_3,w_1_1,w_2_1,w_3_1,w_4_1,w_1_2,w_2_2,w_3_2,w_4_2,w_1_3,w_2_3,w_3_3,w_4_3]
+
+-30x1-y11+w11<=-200
+-3.6x2-y21+w21<=-240
+-24x3+w31+w41<=0
+w31<=6000
+
+
 12/11
 Add dual funaction and have duals in SolveUsingPrimalSimplexSubproblem
-
-
-
 
 12/7
 我目前完成
