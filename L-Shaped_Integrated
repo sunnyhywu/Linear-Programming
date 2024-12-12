@@ -1,0 +1,545 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using ILOG.Concert;
+using ILOG.CPLEX;
+
+namespace IntegratedLShapedWithDualsExample
+{
+    class Program
+    {
+        static void Main(string[] args)
+        {
+            // 從使用者輸入 scenario 數量
+            Console.WriteLine("Enter the number of scenarios:");
+            int numScenarios;
+            while (!int.TryParse(Console.ReadLine(), out numScenarios) || numScenarios <= 0)
+            {
+                Console.WriteLine("Invalid input. Enter positive integer for scenarios:");
+            }
+
+            // 在此您須自行建立 scenarioData 字典，將每個 scenario 的子問題參數放入
+            // 假設您外部已有資料或由檔案讀取，以下僅為示意
+            // scenarioData[scenarioIndex] = (W, T_k, h_k, q_k)
+            var scenarioData = new Dictionary<int, (double[,] W, double[,] T_k, double[] h_k, double[] q_k)>();
+            // 以下為範例，需依實際問題填入適當資料
+            for (int s = 1; s <= numScenarios; s++)
+            {
+                // 這裡您必須根據您的實際問題對每個場景填入 W, T_k, h_k, q_k
+                // 示意資料 (需更換為真實資料)：
+                double[,] W = {
+                    {1,0,-1,0,0,0},
+                    {0,1,0,-1,0,0},
+                    {0,0,0,0,1,1},
+                    {0,0,0,0,1,0}
+                };
+
+                double[,] T_k = {
+                    {-3.0, 0.0, 0.0},
+                    {0.0,-3.6,0.0},
+                    {0.0,0.0,-20.0},
+                    {0.0,0.0,0.0}
+                };
+
+                double[] h_k = { -200.0, -240.0, 0.0, 6000.0 };
+                double[] q_k = { 238.0, 210.0, -170.0, -150.0, -36.0, -10.0 };
+
+                scenarioData[s] = (W, T_k, h_k, q_k);
+            }
+
+            List<string> allVariables = GenerateAllVariables(numScenarios);
+            Console.WriteLine("\nAll Variables:");
+            foreach (var v in allVariables) Console.Write(v + " ");
+            Console.WriteLine();
+
+            Console.WriteLine("\nEnter variables to include in the master problem (comma-separated):");
+            string inputVars = Console.ReadLine();
+            string[] masterVars = inputVars.Split(',').Select(s => s.Trim()).Where(s => s != "").ToArray();
+
+            // 場景機率(示例用)
+            double[] P = new double[numScenarios];
+            for (int i = 0; i < numScenarios; i++) P[i] = 1.0 / numScenarios;
+
+            double[] fullObj = BuildObjectiveCoefficients(allVariables, numScenarios, P);
+            double[,] fullLHS = BuildFullLHS(allVariables, numScenarios);
+            double[] fullRHS = BuildFullRHS(numScenarios);
+
+            var masterData = ExtractMasterData(allVariables, fullObj, fullLHS, fullRHS, masterVars);
+            double[] masterCoefficients = masterData.masterCoefficients;
+            double[,] masterLHS = masterData.masterLHS;
+            double[] masterRHS = masterData.masterRhs;
+            int masterCons = masterData.masterCons;
+            int masterTotalVars = masterData.masterTotalVars;
+            string[] masterVarNames = masterData.masterVarNames;
+
+            bool isCompleteRecourse = CheckCompleteRecourse(masterVars);
+
+            double UB = double.PositiveInfinity;
+            double LB = double.NegativeInfinity;
+            double eps = 1e-6;
+            int maxIterations = 50;
+
+            bool optimalFound = false;
+            for (int iter = 1; iter <= maxIterations; iter++)
+            {
+                Console.WriteLine($"\n--- L-Shaped Iteration {iter} ---");
+                var masterRes = SolveUsingPrimalSimplex(masterLHS, masterRHS, masterCoefficients, masterTotalVars, masterCons);
+                if (!masterRes.feasible)
+                {
+                    Console.WriteLine("Master infeasible! Stop.");
+                    break;
+                }
+
+                double[] masterSol = masterRes.solution;
+                double objValMaster = masterRes.objVal;
+                LB = objValMaster;
+
+                double x1 = 0, x2 = 0, x3 = 0, thetaVal = 0;
+                Dictionary<string, double> masterSolMap = new Dictionary<string, double>();
+                for (int i = 0; i < masterVarNames.Length; i++)
+                {
+                    masterSolMap[masterVarNames[i]] = masterSol[i];
+                    if (masterVarNames[i] == "x_1") x1 = masterSol[i];
+                    if (masterVarNames[i] == "x_2") x2 = masterSol[i];
+                    if (masterVarNames[i] == "x_3") x3 = masterSol[i];
+                    if (masterVarNames[i] == "theta") thetaVal = masterSol[i];
+                }
+
+                bool addedCut = false;
+                double expectedCost = 0.0;
+
+                // 用於存所有場景對偶解 (π_k^v)
+                List<double[]> allScenariosDuals = new List<double[]>();
+
+                // 逐場景解子問題
+                for (int s = 1; s <= numScenarios; s++)
+                {
+                    var (W, T_k, h_k, q_k) = ExtractScenarioSubproblemData(scenarioData, s);
+                    double[] rhsSub = ComputeScenarioRHS(x1, x2, x3, T_k, h_k);
+                    var subRes = SolveSubproblemScenario(x1, x2, x3, (W, T_k, h_k, q_k), rhsSub);
+                    bool feasibleSP = subRes.feasible;
+
+                    if (!feasibleSP && !isCompleteRecourse)
+                    {
+                        // 加入feasibility cut
+                        AddFeasibilityCut(ref masterLHS, ref masterRHS, ref masterCoefficients, masterVarNames, subRes.duals);
+                        masterCons = masterRHS.Length;
+                        masterTotalVars = masterCoefficients.Length;
+                        addedCut = true;
+                        Console.WriteLine($"Scenario {s}: Feasibility cut added.");
+                        break;
+                    }
+                    else if (feasibleSP)
+                    {
+                        expectedCost += P[s - 1] * subRes.objVal;
+                        allScenariosDuals.Add(subRes.duals);
+                    }
+                }
+
+                if (!addedCut)
+                {
+                    // 所有場景可行，現在計算 E_s, e_s
+                    double[] E_s_vector = new double[3]; // 假設 x_1,x_2,x_3 共3維
+                    double e_s = 0.0;
+
+                    for (int s = 1; s <= numScenarios; s++)
+                    {
+                        var (W, T_k, h_k, q_k) = ExtractScenarioSubproblemData(scenarioData, s);
+                        double[] pi_k = allScenariosDuals[s - 1];
+                        double P_k = P[s - 1];
+
+                        int m = h_k.Length;
+                        int xCount = 3;
+                        double[] piT = new double[xCount];
+                        for (int j = 0; j < xCount; j++)
+                        {
+                            double sum = 0.0;
+                            for (int i = 0; i < m; i++)
+                                sum += pi_k[i] * T_k[i, j];
+                            piT[j] = sum;
+                        }
+
+                        double pi_h = 0.0;
+                        for (int i = 0; i < m; i++)
+                            pi_h += pi_k[i] * h_k[i];
+
+                        for (int j = 0; j < xCount; j++)
+                            E_s_vector[j] += P_k * piT[j];
+
+                        e_s += P_k * pi_h;
+                    }
+
+                    double w_v = e_s - (E_s_vector[0] * x1 + E_s_vector[1] * x2 + E_s_vector[2] * x3);
+
+                    if (thetaVal < w_v - eps)
+                    {
+                        AddOptimalityCut(ref masterLHS, ref masterRHS, ref masterCoefficients, masterVarNames, e_s, E_s_vector);
+                        masterCons = masterRHS.Length;
+                        masterTotalVars = masterCoefficients.Length;
+                        addedCut = true;
+                        Console.WriteLine("Optimality cut added.");
+                    }
+
+                    if (!addedCut)
+                    {
+                        double newUB = LB + (expectedCost - thetaVal);
+                        UB = Math.Min(UB, newUB);
+                        if (Math.Abs(UB - LB) < eps)
+                        {
+                            Console.WriteLine("Converged: UB ~ LB");
+                            optimalFound = true;
+                            break;
+                        }
+                    }
+                }
+
+            }
+
+            if (optimalFound)
+            {
+                Console.WriteLine("Optimal solution found.");
+                var finalRes = SolveUsingPrimalSimplex(masterLHS, masterRHS, masterCoefficients, masterTotalVars, masterCons);
+                PrintFinalSolution(masterVarNames, finalRes.solution);
+            }
+            else
+            {
+                Console.WriteLine("Max iterations or no convergence reached.");
+            }
+        }
+
+
+        // 以下為原先定義的功能函式，只保留不需硬編碼的部分
+        // 如果需修改請視實際狀況而定
+
+        static List<string> GenerateAllVariables(int numScenarios)
+        {
+            List<string> vars = new List<string>();
+            vars.Add("theta");
+            vars.Add("x_1");
+            vars.Add("x_2");
+            vars.Add("x_3");
+            for (int s = 1; s <= numScenarios; s++)
+            {
+                vars.Add($"y_1_{s}");
+                vars.Add($"y_2_{s}");
+            }
+            for (int s = 1; s <= numScenarios; s++)
+            {
+                vars.Add($"w_1_{s}");
+                vars.Add($"w_2_{s}");
+                vars.Add($"w_3_{s}");
+                vars.Add($"w_4_{s}");
+            }
+            return vars;
+        }
+
+        static double[] BuildObjectiveCoefficients(List<string> vars, int numScenarios, double[] P)
+        {
+            double[] coeff = new double[vars.Count];
+            for (int i = 0; i < vars.Count; i++)
+            {
+                string v = vars[i];
+                if (v == "theta") coeff[i] = 1.0;
+                else if (v == "x_1") coeff[i] = -150;
+                else if (v == "x_2") coeff[i] = -230;
+                else if (v == "x_3") coeff[i] = -260;
+                else if (v.StartsWith("y_1_")) coeff[i] = 238.0 * P[ExtractScenarioIndex(v) - 1];
+                else if (v.StartsWith("y_2_")) coeff[i] = 210.0 * P[ExtractScenarioIndex(v) - 1];
+                else if (v.StartsWith("w_1_")) coeff[i] = -170.0 * P[ExtractScenarioIndex(v) - 1];
+                else if (v.StartsWith("w_2_")) coeff[i] = -150.0 * P[ExtractScenarioIndex(v) - 1];
+                else if (v.StartsWith("w_3_")) coeff[i] = -36.0 * P[ExtractScenarioIndex(v) - 1];
+                else if (v.StartsWith("w_4_")) coeff[i] = -10.0 * P[ExtractScenarioIndex(v) - 1];
+                else coeff[i] = 0.0;
+            }
+            return coeff;
+        }
+
+        static int ExtractScenarioIndex(string varName)
+        {
+            string[] parts = varName.Split('_');
+            return int.Parse(parts[parts.Length - 1]);
+        }
+
+        static double[,] BuildFullLHS(List<string> vars, int numScenarios)
+        {
+            int cons = 1 + numScenarios * 4;
+            int vcount = vars.Count;
+            double[,] lhs = new double[cons, vcount];
+
+            lhs[0, vars.IndexOf("x_1")] = 1;
+            lhs[0, vars.IndexOf("x_2")] = 1;
+            lhs[0, vars.IndexOf("x_3")] = 1;
+
+            for (int s = 1; s <= numScenarios; s++)
+            {
+                int baseRow = 1 + (s - 1) * 4;
+                lhs[baseRow, vars.IndexOf("x_1")] = -3.0;
+                lhs[baseRow, vars.IndexOf($"y_1_{s}")] = -1.0;
+                lhs[baseRow, vars.IndexOf($"w_1_{s}")] = 1.0;
+
+                lhs[baseRow + 1, vars.IndexOf("x_2")] = -3.6;
+                lhs[baseRow + 1, vars.IndexOf($"y_2_{s}")] = -1.0;
+                lhs[baseRow + 1, vars.IndexOf($"w_2_{s}")] = 1.0;
+
+                lhs[baseRow + 2, vars.IndexOf($"w_3_{s}")] = 1.0;
+                lhs[baseRow + 2, vars.IndexOf($"w_4_{s}")] = 1.0;
+                lhs[baseRow + 2, vars.IndexOf("x_3")] = -20.0;
+
+                lhs[baseRow + 3, vars.IndexOf($"w_3_{s}")] = 1.0;
+            }
+
+            return lhs;
+        }
+
+        static double[] BuildFullRHS(int numScenarios)
+        {
+            List<double> rhs = new List<double>();
+            rhs.Add(500.0); // land
+            for (int s = 1; s <= numScenarios; s++)
+            {
+                rhs.Add(-200.0); // wheat
+                rhs.Add(-240.0); // corn
+                rhs.Add(0.0);    // sugar
+                rhs.Add(6000.0); // w_3_s ≤6000
+            }
+            return rhs.ToArray();
+        }
+
+        static (double[] masterCoefficients, double[] subproblemCoefficients,
+                double[,] masterLHS, double[] masterRhs,
+                int masterCons, int masterTotalVars,
+                string[] masterVarNames, List<int> masterVarIndices)
+        ExtractMasterData(
+            List<string> allVars, double[] objCoeffs, double[,] lhs, double[] rhs, string[] masterVars)
+        {
+            int numCons = lhs.GetLength(0);
+            int numVars = lhs.GetLength(1);
+
+            HashSet<string> mSet = new HashSet<string>(masterVars);
+            List<int> mIndices = new List<int>();
+            for (int i = 0; i < allVars.Count; i++)
+            {
+                if (mSet.Contains(allVars[i]))
+                    mIndices.Add(i);
+            }
+
+            int masterCons = numCons;
+            int masterTotalVars = mIndices.Count + masterCons;
+
+            double[,] masterLhs = new double[masterCons, masterTotalVars];
+            double[] masterRhs = new double[masterCons];
+            for (int i = 0; i < masterCons; i++)
+            {
+                for (int j = 0; j < mIndices.Count; j++)
+                    masterLhs[i, j] = lhs[i, mIndices[j]];
+                masterLhs[i, mIndices.Count + i] = 1.0; // slack var
+                masterRhs[i] = rhs[i];
+            }
+
+            double[] masterCoefficients = new double[masterTotalVars];
+            double[] subproblemCoefficients = new double[masterTotalVars];
+            for (int j = 0; j < mIndices.Count; j++)
+                masterCoefficients[j] = objCoeffs[mIndices[j]];
+            for (int i = 0; i < masterCons; i++)
+                masterCoefficients[mIndices.Count + i] = 0.0; // slack cost=0
+
+            string[] masterVarNames = new string[masterTotalVars];
+            for (int j = 0; j < mIndices.Count; j++)
+                masterVarNames[j] = allVars[mIndices[j]];
+            for (int i = 0; i < masterCons; i++)
+                masterVarNames[mIndices.Count + i] = $"slack_{i + 1}";
+
+            return (masterCoefficients, subproblemCoefficients, masterLhs, masterRhs,
+                    masterCons, masterTotalVars, masterVarNames, mIndices);
+        }
+
+        static bool CheckCompleteRecourse(string[] masterVars)
+        {
+            foreach (var mv in masterVars)
+            {
+                if (mv.StartsWith("y_") || mv.StartsWith("w_"))
+                    return false;
+            }
+            return true;
+        }
+
+        // 由 scenarioData 提取相對應場景數據 (已無硬編碼)
+        static (double[,] W, double[,] T_k, double[] h_k, double[] q_k) ExtractScenarioSubproblemData(
+            Dictionary<int, (double[,] W, double[,] T_k, double[] h_k, double[] q_k)> scenarioData,
+            int scenarioIndex)
+        {
+            return scenarioData[scenarioIndex];
+        }
+
+        // 動態計算次問題 RHS
+        static double[] ComputeScenarioRHS(double x1, double x2, double x3, double[,] T_k, double[] h_k)
+        {
+            int m = h_k.Length;
+            double[] rhs = new double[m];
+            for (int i = 0; i < m; i++)
+            {
+                double val = h_k[i] - (T_k[i, 0] * x1 + T_k[i, 1] * x2 + T_k[i, 2] * x3);
+                rhs[i] = val;
+            }
+            return rhs;
+        }
+
+        static (bool feasible, double objVal, double[] duals, bool farkas)
+        SolveSubproblemScenario(double x1, double x2, double x3, (double[,] W, double[,] T_k, double[] h_k, double[] q_k) data, double[] rhs)
+        {
+            var (W, T_k, h_k, q_k) = data;
+            using (Cplex subCplex = new Cplex())
+            {
+                int m = h_k.Length;
+                int yCount = W.GetLength(1);
+                INumVar[] y = subCplex.NumVarArray(yCount, 0.0, Double.PositiveInfinity);
+
+                ILinearNumExpr subObj = subCplex.LinearNumExpr();
+                for (int j = 0; j < yCount; j++)
+                    subObj.AddTerm(q_k[j], y[j]);
+                subCplex.AddMinimize(subObj);
+
+                for (int i = 0; i < m; i++)
+                {
+                    ILinearNumExpr con = subCplex.LinearNumExpr();
+                    for (int j = 0; j < yCount; j++)
+                        con.AddTerm(W[i, j], y[j]);
+                    subCplex.AddEq(con, rhs[i], "OptCon_" + i);
+                }
+
+                bool feasible = subCplex.Solve();
+                if (!feasible)
+                {
+                    return (false, Double.PositiveInfinity, null, true);
+                }
+
+                double objVal = subCplex.ObjValue;
+                IRange[] constraints = new IRange[m];
+                for (int i = 0; i < m; i++)
+                    constraints[i] = (IRange)subCplex.GetConstraint("OptCon_" + i);
+
+                double[] duals = subCplex.GetDuals(constraints);
+                return (true, objVal, duals, false);
+            }
+        }
+
+        static void AddFeasibilityCut(
+    ref double[,] lhs,
+    ref double[] rhs,
+    ref double[] objCoeffs,
+    string[] varNames,
+    double[] duals,
+    ScenarioData data)
+        {
+            int oldCons = rhs.Length;
+            int oldVars = objCoeffs.Length;
+
+            int m = data.h_k.Length;        // 子問題限制式數量
+            int nX = data.T_k.GetLength(1); // 第一階段變數數量
+
+            // 計算 d_r = (duals)^T h_k
+            double d_r = 0.0;
+            for (int i = 0; i < m; i++)
+                d_r += duals[i] * data.h_k[i];
+
+            // 計算 D_r = (duals)^T T_k (為nX維向量)
+            double[] D_r = new double[nX];
+            for (int j = 0; j < nX; j++)
+            {
+                double sum = 0.0;
+                for (int i = 0; i < m; i++)
+                    sum += duals[i] * data.T_k[i, j];
+                D_r[j] = sum;
+            }
+
+            // 新增一列限制式
+            double[,] newLhs = new double[oldCons + 1, oldVars];
+            for (int i = 0; i < oldCons; i++)
+                for (int j = 0; j < oldVars; j++)
+                    newLhs[i, j] = lhs[i, j];
+
+            double[] newRhs = new double[oldCons + 1];
+            for (int i = 0; i < oldCons; i++)
+                newRhs[i] = rhs[i];
+
+            int newRow = oldCons;
+
+            // 在 varNames 中找出所有 x_變數，將 D_r 的係數放入 newLhs
+            // x_變數依據問題定義可能有不同的命名規則
+            // 假設 x 變數命名為 x_1, x_2, ... x_nX
+            for (int j = 0; j < nX; j++)
+            {
+                string xName = "x_" + (j + 1);
+                int xIndex = Array.IndexOf(varNames, xName);
+                if (xIndex < 0)
+                    throw new Exception($"Variable {xName} not found in varNames.");
+                newLhs[newRow, xIndex] = D_r[j];
+            }
+
+            // RHS 為 d_r
+            newRhs[newRow] = d_r;
+
+            lhs = newLhs;
+            rhs = newRhs;
+        }
+
+
+        static void AddOptimalityCut(ref double[,] lhs, ref double[] rhs, ref double[] objCoeffs, string[] varNames, double e_s, double[] E_s_vector)
+        {
+            int oldCons = rhs.Length;
+            int oldVars = objCoeffs.Length;
+            double[,] newLhs = new double[oldCons + 1, oldVars];
+            for (int i = 0; i < oldCons; i++)
+                for (int j = 0; j < oldVars; j++)
+                    newLhs[i, j] = lhs[i, j];
+
+            for (int j = 0; j < oldVars; j++)
+            {
+                if (varNames[j] == "theta")
+                    newLhs[oldCons, j] = 1.0;
+                else if (varNames[j] == "x_1") newLhs[oldCons, j] = E_s_vector[0];
+                else if (varNames[j] == "x_2") newLhs[oldCons, j] = E_s_vector[1];
+                else if (varNames[j] == "x_3") newLhs[oldCons, j] = E_s_vector[2];
+                else newLhs[oldCons, j] = 0.0;
+            }
+
+            double[] newRhs = new double[oldCons + 1];
+            for (int i = 0; i < oldCons; i++) newRhs[i] = rhs[i];
+            newRhs[oldCons] = e_s;
+
+            lhs = newLhs;
+            rhs = newRhs;
+        }
+
+        static void PrintFinalSolution(string[] varNames, double[] sol)
+        {
+            if (sol == null) return;
+            Console.WriteLine("\nFinal Optimal Solution:");
+            for (int i = 0; i < varNames.Length; i++)
+            {
+                if (!varNames[i].StartsWith("slack_"))
+                    Console.WriteLine($"{varNames[i]} = {sol[i]:F4}");
+            }
+        }
+
+        static (bool feasible, double[] solution, double objVal) SolveUsingPrimalSimplex(
+            double[,] lhs, double[] rhs, double[] objCoeffs, int totalVars, int numCons)
+        {
+            // 簡化示意，不是真正的單純型法
+            bool feasible = true;
+            double[] solution = new double[totalVars];
+            for (int i = 0; i < totalVars; i++) solution[i] = 0.0;
+            for (int i = 0; i < numCons; i++)
+            {
+                int slackIndex = totalVars - numCons + i;
+                solution[slackIndex] = rhs[i];
+            }
+
+            double objVal = 0.0;
+            for (int j = 0; j < totalVars; j++)
+                objVal += solution[j] * objCoeffs[j];
+
+            return (feasible, solution, objVal);
+        }
+    }
+}
