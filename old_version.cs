@@ -93,7 +93,7 @@ namespace StochasticFarmerProblem
             //6.L-shaped method並且根據每一次迭代跑一個h_k,q_k,T_k(所以會在scenario的迴圈中每次跑)
             for (int s = 0; s < numScenarios; s++)
             {
-                var (H, Q, T, W) = ExtractHAndQAndT(
+                var (W,T, H, Q) = ExtractHAndQAndT(
                                 subproblemCoefficients,
                                 subproblemLhs,
                                 subproblemRhs,
@@ -105,7 +105,7 @@ namespace StochasticFarmerProblem
             }
 
             //====================Some functions================================
-            (List<double>, List<double>, List<List<double>>, List<List<double>>) ExtractHAndQAndT(
+            (List<List<double>>, List<List<double>>, List<double>, List<double>) ExtractHAndQAndT(
         double[] subproblemCoefficients,
         double[,] subproblemLhs,
         double[] subproblemRhs,
@@ -249,7 +249,7 @@ namespace StochasticFarmerProblem
                     Console.WriteLine();
                 }
 
-                return (H, Q, T,W);
+                return (W,T,H, Q );
             }
             static (double[] masterCoefficients, double[] subproblemCoefficient,
             double[,] masterLhs, double[] masterRhs,
@@ -580,6 +580,17 @@ namespace StochasticFarmerProblem
             {
                 Console.WriteLine($"{rhs:F2}");
             }
+            /*
+            Console.WriteLine("\n W:");
+            for (int i = 0; i < W.GetLength(0); i++)
+            {
+                for (int j = 0; j < W.GetLength(1); j++)
+                {
+                    Console.Write($"{W[i, j],8:F2} ");
+                }
+                Console.WriteLine();
+            }
+            */
 
             // Solve Using Primal Simplex Method
             static void SolveUsingPrimalSimplex(double[,] lhs, double[] rhs,
