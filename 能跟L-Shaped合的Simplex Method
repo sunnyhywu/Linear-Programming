@@ -16,9 +16,40 @@ double[] objCoeffs = GenerateObjectiveCoefficients(); // Replace with your logic
 int totalVars = objCoeffs.Length;
 int numConstraints = rhs.Length;
 
-SimplexSolver simplex = new SimplexSolver(lhs, rhs, objCoeffs, totalVars, numConstraints);
+SimplexSolver simplexSolver = new SimplexSolver(lhs, rhs, objCoeffs, totalVars, numConstraints);
 simplex.Solve();
 var (optimalValue, primalSolution, shadowPrices) = simplexSolver.GetSolutionDetails();
+
+Example input:
+
+    private double[,] GenerateLHSMatrix()
+        {
+            {
+                { 2, 1, 1, 0 },
+                { 1, 2, 0, 1 }
+            };
+        }
+    
+        private double[] GenerateRHSVector()
+        {
+            return new double[] { 4, 6 };
+        }
+    
+        private double[] GenerateObjectiveCoefficients()
+        {
+            return new double[] { 3, 2, 0, 0 };
+        }
+
+Example outcome:
+Optimal Value: 10.00
+Primal Solution:
+x1 = 2.00
+x2 = 1.00
+x3 = 0.00
+x4 = 0.00
+Shadow Prices:
+Constraint 1: 1.00
+Constraint 2: 1.00
 */
 
 
