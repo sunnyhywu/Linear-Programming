@@ -1,0 +1,404 @@
+L-Shaped Method
+
+
+
+using System;
+using ILOG.Concert;
+using ILOG.CPLEX;
+
+namespace LShapedMethodFixedExample
+{
+    class Program
+    {
+        // 問題相關參數 (請根據實際問題修改)
+        // 假設：x有n個變數
+        static int n = 3;
+        // A, b: 主問題限制 A x = b
+        static double[,] A = {
+            {1.0, 1.0, 0.0},
+            {0.0, 1.0, 1.0}
+        };
+        static double[] b = {10.0, 15.0};
+        
+        // 主問題第一階段成本 c^T x
+        static double[] c = {1.0, 2.0, 3.0};
+
+        // 假設有K個場景
+        static int K = 2; 
+        static double[] P = {0.5, 0.5}; 
+
+        // 子問題參數 (W, T_k, h_k, q_k)
+        // 範例數值請依實務問題更改
+        static double[,] W = {
+            {1.0, 0.0}, // 假設y有2個變數
+            {0.0, 1.0}
+        };
+
+        static double[] h_k1 = {20.0, 25.0};
+        static double[,] T_k1 = {
+            {2.0, 0.0, 1.0},
+            {0.0, 1.0, 2.0}
+        };
+        static double[] q_k1 = {5.0, 4.0};
+
+        static double[] h_k2 = {18.0, 30.0};
+        static double[,] T_k2 = {
+            {1.0, 1.0, 1.0},
+            {1.0, 2.0, 1.0}
+        };
+        static double[] q_k2 = {6.0, 3.0};
+
+        // L-Shaped Method參數
+        static int r = 0; // feasibility cuts 計數器
+        static int s = 0; // optimality cuts 計數器
+        static double eps = 1e-6;
+        static int maxIter = 50;
+        static Cplex masterCplex;
+        static INumVar[] xVars;
+        static INumVar thetaVar;
+
+        static void Main(string[] args)
+        {
+            // 初始化主問題
+            masterCplex = new Cplex();
+            BuildMasterProblem(masterCplex, out xVars, out thetaVar);
+
+            bool optimalFound = false;
+            int iteration = 0;
+            double lowerBound = Double.NegativeInfinity;
+            double upperBound = Double.PositiveInfinity;
+
+            while (!optimalFound && iteration < maxIter)
+            {
+                iteration++;
+                Console.WriteLine($"Iteration {iteration} ...");
+
+                bool solved = masterCplex.Solve();
+                if (!solved)
+                {
+                    Console.WriteLine("Master problem infeasible!");
+                    break;
+                }
+
+                double objValue = masterCplex.ObjValue;
+                double[] xVal = masterCplex.GetValues(xVars);
+                double thetaVal = masterCplex.GetValue(thetaVar);
+                Console.WriteLine($"Master solution: x = {String.Join(", ", xVal)}, theta = {thetaVal}, Obj = {objValue}");
+
+                // 更新上界 (依實務問題而定，通常objValue即暫定UB)
+                upperBound = Math.Min(upperBound, objValue);
+
+                // Step 2: Feasibility check
+                bool feasibilityCutAdded = CheckFeasibilitySubproblems(xVal);
+                if (feasibilityCutAdded)
+                {
+                    // 有加cut，回到主問題求解
+                    continue;
+                }
+
+                // Step 3: Optimality check
+                double w_v;
+                bool needOptimalityCut = CheckOptimalitySubproblems(xVal, thetaVal, out w_v);
+
+                if (!needOptimalityCut)
+                {
+                    // θ^v ≥ w^v，表示達最適
+                    lowerBound = Math.Max(lowerBound, thetaVal);
+                    if (Math.Abs(upperBound - lowerBound) < eps)
+                    {
+                        Console.WriteLine("Converged!");
+                        optimalFound = true;
+                    }
+                }
+                else
+                {
+                    // 加入optimality cut後，回到主問題求解
+                    continue;
+                }
+            }
+
+            if (optimalFound)
+            {
+                Console.WriteLine("Optimal solution found:");
+                double[] finalX = masterCplex.GetValues(xVars);
+                double finalTheta = masterCplex.GetValue(thetaVar);
+                Console.WriteLine($"x* = {String.Join(", ", finalX)}, theta* = {finalTheta}, Obj = {masterCplex.ObjValue}");
+            }
+            else
+            {
+                Console.WriteLine("Max iteration reached or infeasible problem.");
+            }
+
+            masterCplex.End();
+        }
+
+        static void BuildMasterProblem(Cplex cplex, out INumVar[] xVars, out INumVar thetaVar)
+        {
+            xVars = new INumVar[n];
+            for (int i = 0; i < n; i++)
+            {
+                xVars[i] = cplex.NumVar(0.0, Double.PositiveInfinity, NumVarType.Float, "x_"+i);
+            }
+
+            thetaVar = cplex.NumVar(Double.NegativeInfinity, Double.PositiveInfinity, NumVarType.Float, "theta");
+
+            // 目標: min c^T x + θ
+            ILinearNumExpr obj = cplex.LinearNumExpr();
+            for (int i = 0; i < n; i++)
+                obj.AddTerm(c[i], xVars[i]);
+            obj.AddTerm(1.0, thetaVar);
+            cplex.AddMinimize(obj);
+
+            // A x = b
+            int Arow = A.GetLength(0);
+            int Acol = A.GetLength(1);
+            for (int i = 0; i < Arow; i++)
+            {
+                ILinearNumExpr con = cplex.LinearNumExpr();
+                for (int j = 0; j < Acol; j++)
+                {
+                    con.AddTerm(A[i,j], xVars[j]);
+                }
+                cplex.AddEq(con, b[i], "A_eq_"+i);
+            }
+        }
+
+        // 檢查可行性子問題並加入feasibility cut(若需)
+        static bool CheckFeasibilitySubproblems(double[] xVal)
+        {
+            bool cutAdded = false;
+
+            // 場景1
+            cutAdded |= CheckFeasibilitySubproblem(xVal, W, h_k1, T_k1);
+            // 場景2
+            cutAdded |= CheckFeasibilitySubproblem(xVal, W, h_k2, T_k2);
+
+            return cutAdded;
+        }
+
+        static bool CheckFeasibilitySubproblem(double[] xVal, double[,] W, double[] h_k, double[,] T_k)
+        {
+            using (Cplex subCplex = new Cplex())
+            {
+                int M_w = W.GetLength(0);
+                int Y_num = W.GetLength(1);
+
+                // y, v^+, v^- ≥ 0
+                INumVar[] y = subCplex.NumVarArray(Y_num, 0.0, Double.PositiveInfinity);
+                INumVar[] v_plus = subCplex.NumVarArray(M_w, 0.0, Double.PositiveInfinity);
+                INumVar[] v_minus = subCplex.NumVarArray(M_w, 0.0, Double.PositiveInfinity);
+
+                // 目標: min sum(v^+) + sum(v^-)
+                ILinearNumExpr subObj = subCplex.LinearNumExpr();
+                foreach (var vp in v_plus) subObj.AddTerm(1.0, vp);
+                foreach (var vm in v_minus) subObj.AddTerm(1.0, vm);
+                subCplex.AddMinimize(subObj);
+
+                double[] rhs = ComputeRHS(h_k, T_k, xVal);
+
+                // 因為是 W y + v^+ - v^- = h_k - T_k x
+                // 這裡簡化假設只有一組限制或請自行根據M_w完整加入
+                // 假設 M_w=2 (W為2x2範例)
+                IRange[] feasibilityConstraints = new IRange[M_w];
+                for (int i = 0; i < M_w; i++)
+                {
+                    ILinearNumExpr con = subCplex.LinearNumExpr();
+                    // W[i,*] y
+                    for (int j = 0; j < Y_num; j++)
+                    {
+                        con.AddTerm(W[i,j], y[j]);
+                    }
+                    con.AddTerm(1.0, v_plus[i]);
+                    con.AddTerm(-1.0, v_minus[i]);
+
+                    feasibilityConstraints[i] = subCplex.AddEq(con, rhs[i], "feasCon_" + i);
+                }
+
+                bool feasible = subCplex.Solve();
+                if (!feasible)
+                {
+                    Console.WriteLine("Feasibility subproblem infeasible - check model setup.");
+                    return false;
+                }
+
+                double w_prime = subCplex.ObjValue;
+                if (w_prime > eps)
+                {
+                    // 加入feasibility cut
+                    r++;
+                    Console.WriteLine("Feasibility cut needed.");
+
+                    double[] duals = subCplex.GetDuals(feasibilityConstraints);
+                    double[] D_r = ComputeDr(duals, T_k);
+                    double d_r = DotProduct(duals, h_k);
+
+                    AddFeasibilityCut(D_r, d_r);
+                    Console.WriteLine("Feasibility cut added.");
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        static bool CheckOptimalitySubproblems(double[] xVal, double thetaVal, out double w_v)
+        {
+            // 計算 w_v = e_s - E_s x^v
+            // E_s, e_s 從optimality子問題對偶解獲得
+
+            // 場景1
+            double[] duals1 = SolveOptimalitySubproblem(xVal, W, h_k1, T_k1, q_k1);
+            // 場景2
+            double[] duals2 = SolveOptimalitySubproblem(xVal, W, h_k2, T_k2, q_k2);
+
+            double[] E_s = new double[n];
+            double e_s = 0.0;
+            AccumulateEsAndes(duals1, T_k1, h_k1, P[0], ref E_s, ref e_s);
+            AccumulateEsAndes(duals2, T_k2, h_k2, P[1], ref E_s, ref e_s);
+
+            w_v = e_s - DotProduct(E_s, xVal);
+
+            if (thetaVal >= w_v - eps)
+            {
+                // Optimal
+                return false;
+            }
+            else
+            {
+                // 加optimality cut: θ + E_s x ≥ e_s
+                s++;
+                ILinearNumExpr cut = masterCplex.LinearNumExpr();
+                cut.AddTerm(1.0, thetaVar);
+                for (int j = 0; j < n; j++)
+                {
+                    cut.AddTerm(E_s[j], xVars[j]);
+                }
+                masterCplex.AddGe(cut, e_s, "OptCut_s" + s);
+
+                Console.WriteLine("Optimality cut added.");
+                return true;
+            }
+        }
+
+        static double[] SolveOptimalitySubproblem(double[] xVal, double[,] W, double[] h_k, double[,] T_k, double[] q_k)
+        {
+            using (Cplex subCplex = new Cplex())
+            {
+                int M_w = W.GetLength(0);
+                int Y_num = W.GetLength(1);
+
+                INumVar[] y = subCplex.NumVarArray(Y_num, 0.0, Double.PositiveInfinity);
+
+                // min q_k^T y
+                ILinearNumExpr subObj = subCplex.LinearNumExpr();
+                for (int j = 0; j < Y_num; j++)
+                {
+                    subObj.AddTerm(q_k[j], y[j]);
+                }
+                subCplex.AddMinimize(subObj);
+
+                double[] rhs = ComputeRHS(h_k, T_k, xVal);
+                IRange[] optConstraints = new IRange[M_w];
+                for (int i = 0; i < M_w; i++)
+                {
+                    ILinearNumExpr con = subCplex.LinearNumExpr();
+                    for (int j = 0; j < Y_num; j++)
+                    {
+                        con.AddTerm(W[i,j], y[j]);
+                    }
+                    optConstraints[i] = subCplex.AddEq(con, rhs[i], "OptCon_" + i);
+                }
+
+                bool feasible = subCplex.Solve();
+                if (!feasible)
+                {
+                    Console.WriteLine("Optimality subproblem infeasible - check model.");
+                    return null;
+                }
+
+                double[] duals = subCplex.GetDuals(optConstraints);
+                return duals;
+            }
+        }
+
+        static void AddFeasibilityCut(double[] D_r, double d_r)
+        {
+            ILinearNumExpr cut = masterCplex.LinearNumExpr();
+            for (int j = 0; j < n; j++)
+            {
+                cut.AddTerm(D_r[j], xVars[j]);
+            }
+            masterCplex.AddGe(cut, d_r, "FeasCut_r" + r);
+        }
+
+        static double[] ComputeRHS(double[] h_k, double[,] T_k, double[] xVal)
+        {
+            int m = h_k.Length;
+            double[] rhs = new double[m];
+            for (int i = 0; i < m; i++)
+            {
+                double val = h_k[i];
+                for (int j = 0; j < xVal.Length; j++)
+                {
+                    val -= T_k[i,j]*xVal[j];
+                }
+                rhs[i] = val;
+            }
+            return rhs;
+        }
+
+        static double[] ComputeDr(double[] duals, double[,] T_k)
+        {
+            int m = duals.Length;
+            int nn = T_k.GetLength(1);
+            double[] D_r = new double[nn];
+            for (int j = 0; j < nn; j++)
+            {
+                double sum = 0.0;
+                for (int i = 0; i < m; i++)
+                {
+                    sum += duals[i]*T_k[i,j];
+                }
+                D_r[j] = sum;
+            }
+            return D_r;
+        }
+
+        static void AccumulateEsAndes(double[] pi_v_k, double[,] T_k, double[] h_k, double P_k, ref double[] E_s, ref double e_s)
+        {
+            int m = pi_v_k.Length;
+            int nn = T_k.GetLength(1);
+
+            double[] piT = new double[nn];
+            for (int j = 0; j < nn; j++)
+            {
+                double sum = 0.0;
+                for (int i = 0; i < m; i++)
+                {
+                    sum += pi_v_k[i]*T_k[i,j];
+                }
+                piT[j] = sum;
+            }
+
+            double pi_h = 0.0;
+            for (int i = 0; i < m; i++)
+            {
+                pi_h += pi_v_k[i]*h_k[i];
+            }
+
+            for (int j = 0; j < nn; j++)
+            {
+                E_s[j] += P_k * piT[j];
+            }
+            e_s += P_k * pi_h;
+        }
+
+        static double DotProduct(double[] a, double[] b)
+        {
+            double sum = 0.0;
+            for (int i = 0; i < a.Length; i++)
+                sum += a[i]*b[i];
+            return sum;
+        }
+    }
+}
