@@ -1,0 +1,402 @@
+/*
+ How to Pass Parameters for L-Shaped Method
+If you want to integrate this class with an L-Shaped method, you would typically generate the following inputs dynamically:
+
+LHS Matrix: The constraint matrix of your problem.
+RHS Vector: The right-hand side values.
+Objective Coefficients: The coefficients of the objective function.
+In your L-Shaped method, you can create and initialize an instance of this class as follows:
+
+csharp
+複製程式碼
+// Inside your L-Shaped method:
+double[,] lhs = GenerateLHS(); // Replace with your matrix generator logic
+double[] rhs = GenerateRHS(); // Replace with your RHS generator logic
+double[] objCoeffs = GenerateObjectiveCoefficients(); // Replace with your logic
+int totalVars = objCoeffs.Length;
+int numConstraints = rhs.Length;
+
+SimplexSolver simplex = new SimplexSolver(lhs, rhs, objCoeffs, totalVars, numConstraints);
+simplex.Solve();
+
+*/
+
+
+using System;
+using System.Diagnostics;
+
+class SimplexSolver
+{
+    // Fields to store the problem data
+    private double[] objCoeffs;
+    private double[] rhs;
+    private double[,] lhs;
+    private int totalVars;
+    private int numConstraints;
+
+    // Constructor to initialize the simplex solver
+    public SimplexSolver(double[,] lhs, double[] rhs, double[] objCoeffs, int totalVars, int numConstraints)
+    {
+        this.lhs = lhs;
+        this.rhs = rhs;
+        this.objCoeffs = objCoeffs;
+        this.totalVars = totalVars;
+        this.numConstraints = numConstraints;
+    }
+
+    // Method to determine which simplex method to use
+    public void Solve()
+    {
+        if (CheckUnboundedness())
+        {
+            Console.WriteLine("The problem is unbounded.");
+            return;
+        }
+
+        string method = DetermineSimplexMethod();
+        Console.WriteLine($"Using the {method} method.");
+
+        switch (method)
+        {
+            case "Optimal":
+                Console.WriteLine("The initial solution is optimal.");
+                break;
+
+            case "Primal":
+                SolveUsingPrimalSimplex();
+                break;
+
+            case "Dual":
+                SolveUsingDualSimplex();
+                break;
+
+            default:
+                Console.WriteLine("Unknown method.");
+                break;
+        }
+    }
+
+    private bool CheckUnboundedness()
+    {
+        for (int j = 0; j < totalVars; j++)
+        {
+            if (objCoeffs[j] > 1e-6)
+            {
+                bool isBounded = false;
+                for (int i = 0; i < numConstraints; i++)
+                {
+                    if (lhs[i, j] > 1e-6)
+                    {
+                        isBounded = true;
+                        break;
+                    }
+                }
+                if (!isBounded)
+                {
+                    return true; // Unbounded in this direction
+                }
+            }
+        }
+        return false; // No unbounded direction found
+    }
+
+    private string DetermineSimplexMethod()
+    {
+        bool all_bi_nonnegative = true;
+        bool all_cN_nonpositive = true;
+
+        foreach (double bi in rhs)
+        {
+            if (bi < 0) all_bi_nonnegative = false;
+        }
+
+        foreach (double cN in objCoeffs)
+        {
+            if (cN > 0) all_cN_nonpositive = false;
+        }
+
+        if (all_bi_nonnegative && all_cN_nonpositive)
+        {
+            return "Optimal";
+        }
+        else if (all_bi_nonnegative)
+        {
+            return "Primal";
+        }
+        else if (!all_bi_nonnegative && all_cN_nonpositive)
+        {
+            return "Dual";
+        }
+        else
+        {
+            return "TwoPhase";
+        }
+    }
+
+    private void SolveUsingPrimalSimplex()
+    {
+        Stopwatch stopwatch = new Stopwatch();
+        stopwatch.Start();
+
+        bool shouldContinue = true;
+        int iterationCount = 0;
+        int originalVars = totalVars - numConstraints;
+
+        // Initialize basic variables (slack variables)
+        int[] basicVariables = new int[numConstraints];
+        for (int i = 0; i < numConstraints; i++)
+        {
+            basicVariables[i] = originalVars + i;
+        }
+
+        while (shouldContinue)
+        {
+            iterationCount++;
+            Console.WriteLine($"\n--- Iteration {iterationCount} ---");
+
+            // Calculate the dual variables (pi)
+            double[] pi = new double[numConstraints];
+            for (int i = 0; i < numConstraints; i++)
+            {
+                pi[i] = objCoeffs[basicVariables[i]];
+            }
+
+            // Compute reduced costs for all variables
+            double[] reducedCosts = new double[totalVars];
+            for (int j = 0; j < totalVars; j++)
+            {
+                reducedCosts[j] = objCoeffs[j];
+                for (int i = 0; i < numConstraints; i++)
+                {
+                    reducedCosts[j] -= pi[i] * lhs[i, j];
+                }
+            }
+
+            // Identify the entering variable (most positive reduced cost)
+            int enteringVarIndex = -1;
+            double maxReducedCost = 0;
+            for (int j = 0; j < totalVars; j++)
+            {
+                if (reducedCosts[j] > maxReducedCost)
+                {
+                    maxReducedCost = reducedCosts[j];
+                    enteringVarIndex = j;
+                }
+            }
+
+            // If no entering variable is found, the solution is optimal
+            if (enteringVarIndex == -1)
+            {
+                Console.WriteLine("Optimal solution found.");
+                shouldContinue = false;
+                break;
+            }
+
+            Console.WriteLine($"Chosen entering variable: {(enteringVarIndex < originalVars ? "x" : "s")}{enteringVarIndex + 1}");
+
+            // Perform ratio test to select leaving variable
+            int leavingVarIndex = -1;
+            double minRatio = double.MaxValue;
+            for (int i = 0; i < numConstraints; i++)
+            {
+                if (lhs[i, enteringVarIndex] > 0)
+                {
+                    double ratio = rhs[i] / lhs[i, enteringVarIndex];
+                    if (ratio < minRatio)
+                    {
+                        minRatio = ratio;
+                        leavingVarIndex = i;
+                    }
+                }
+            }
+
+            // If no leaving variable is found, the problem is unbounded
+            if (leavingVarIndex == -1)
+            {
+                Console.WriteLine("Problem is unbounded.");
+                shouldContinue = false;
+                break;
+            }
+
+            Console.WriteLine($"Chosen leaving variable: {(basicVariables[leavingVarIndex] < originalVars ? "x" : "s")}{basicVariables[leavingVarIndex] + 1}");
+
+            // Perform pivot operation
+            double pivotElement = lhs[leavingVarIndex, enteringVarIndex];
+
+            // Update the leaving row in-place
+            for (int j = 0; j < totalVars; j++)
+            {
+                lhs[leavingVarIndex, j] /= pivotElement;
+            }
+            rhs[leavingVarIndex] /= pivotElement;
+
+            // Update all other rows in-place
+            for (int i = 0; i < numConstraints; i++)
+            {
+                if (i != leavingVarIndex)
+                {
+                    double factor = lhs[i, enteringVarIndex];
+                    for (int j = 0; j < totalVars; j++)
+                    {
+                        lhs[i, j] -= factor * lhs[leavingVarIndex, j];
+                    }
+                    rhs[i] -= factor * rhs[leavingVarIndex];
+                }
+            }
+
+            // Update the objective coefficients in-place
+            double objectiveFactor = objCoeffs[enteringVarIndex];
+            for (int j = 0; j < totalVars; j++)
+            {
+                objCoeffs[j] -= objectiveFactor * lhs[leavingVarIndex, j];
+            }
+
+            // Update the basic variable index in-place
+            basicVariables[leavingVarIndex] = enteringVarIndex;
+        }
+
+        // Output the final solution
+        OutputFinalSolution(basicVariables);
+
+        stopwatch.Stop();
+        Console.WriteLine($"Total runtime for Primal method: {stopwatch.Elapsed.TotalSeconds} seconds");
+    }
+
+    private void OutputFinalSolution(int[] basicVariables)
+    {
+        int originalVars = totalVars - numConstraints;
+        Console.WriteLine("\nFinal Solution:");
+        double optimalValue = 0;
+
+        for (int i = 0; i < numConstraints; i++)
+        {
+            int varIndex = basicVariables[i];
+            double value = rhs[i];
+            if (varIndex < originalVars)
+            {
+                Console.WriteLine($"x{varIndex + 1} = {value:F2}");
+            }
+            else
+            {
+                Console.WriteLine($"s{varIndex - originalVars + 1} = {value:F2}");
+            }
+            optimalValue += objCoeffs[varIndex] * value;
+        }
+
+        Console.WriteLine($"\nOptimal Value: {optimalValue:F2}");
+    }
+
+    private void SolveUsingDualSimplex()
+    {
+        Console.WriteLine("\n--- Starting Dual Simplex Method ---");
+
+        int iterationCount = 0;
+        bool shouldContinue = true;
+
+        // Initialize basic variables
+        int[] basicVariables = new int[numConstraints];
+        for (int i = 0; i < numConstraints; i++)
+        {
+            basicVariables[i] = totalVars - numConstraints + i; // Slack variables
+        }
+
+        while (shouldContinue)
+        {
+            iterationCount++;
+            Console.WriteLine($"\n--- Iteration {iterationCount} ---");
+
+            // Step 1: Identify the most negative RHS entry (leaving variable)
+            int leavingVarIndex = -1;
+            double mostNegativeRHS = 0;
+            for (int i = 0; i < numConstraints; i++)
+            {
+                if (rhs[i] < mostNegativeRHS)
+                {
+                    mostNegativeRHS = rhs[i];
+                    leavingVarIndex = i;
+                }
+            }
+
+            // If no negative RHS, the solution is optimal
+            if (leavingVarIndex == -1)
+            {
+                Console.WriteLine("Optimal solution found.");
+                shouldContinue = false;
+                break;
+            }
+
+            Console.WriteLine($"Leaving variable: x{basicVariables[leavingVarIndex] + 1}");
+
+            // Step 2: Select entering variable using the dual feasibility ratio test
+            int enteringVarIndex = -1;
+            double minRatio = double.MaxValue;
+            for (int j = 0; j < totalVars; j++)
+            {
+                if (lhs[leavingVarIndex, j] < 0) // Only consider negative coefficients in the leaving row
+                {
+                    double reducedCost = objCoeffs[j];
+                    for (int i = 0; i < numConstraints; i++)
+                    {
+                        reducedCost -= objCoeffs[basicVariables[i]] * lhs[i, j];
+                    }
+
+                    double ratio = Math.Abs(reducedCost / lhs[leavingVarIndex, j]);
+                    if (ratio < minRatio)
+                    {
+                        minRatio = ratio;
+                        enteringVarIndex = j;
+                    }
+                }
+            }
+
+            // If no entering variable is found, the problem is infeasible
+            if (enteringVarIndex == -1)
+            {
+                Console.WriteLine("Problem is infeasible.");
+                return;
+            }
+
+            Console.WriteLine($"Entering variable: x{enteringVarIndex + 1}");
+
+            // Step 3: Perform pivot operation
+            double pivotElement = lhs[leavingVarIndex, enteringVarIndex];
+
+            // Normalize the leaving row
+            for (int j = 0; j < totalVars; j++)
+            {
+                lhs[leavingVarIndex, j] /= pivotElement;
+            }
+            rhs[leavingVarIndex] /= pivotElement;
+
+            // Update all other rows to zero out the entering variable column
+            for (int i = 0; i < numConstraints; i++)
+            {
+                if (i != leavingVarIndex)
+                {
+                    double factor = lhs[i, enteringVarIndex];
+                    for (int j = 0; j < totalVars; j++)
+                    {
+                        lhs[i, j] -= factor * lhs[leavingVarIndex, j];
+                    }
+                    rhs[i] -= factor * rhs[leavingVarIndex];
+                }
+            }
+
+            // Update the objective function coefficients
+            double objectiveFactor = objCoeffs[enteringVarIndex];
+            for (int j = 0; j < totalVars; j++)
+            {
+                objCoeffs[j] -= objectiveFactor * lhs[leavingVarIndex, j];
+            }
+
+            // Update the basic variables
+            basicVariables[leavingVarIndex] = enteringVarIndex;
+        }
+
+        Console.WriteLine("Dual Simplex Method completed.");
+    }
+
+}
+
+
+
