@@ -1,4 +1,13 @@
 # Linear-Programming
+12/13
+
+Add W, h_k, T_k, q_k 
+
+In x_1,x_2,x_3, all coefficients are right.
+
+但其他情況我還要再試一下。
+
+
 12/12
 Modify矩陣數字的順序+學妹加上去的版本 in old_version.cs
 

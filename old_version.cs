@@ -78,140 +78,268 @@ namespace StochasticFarmerProblem
                 Console.WriteLine(variable.Trim());
             }
 
+
             // 5. Extract Master and Subproblem data
             var (masterCoefficients, subproblemCoefficients, masterLhs, masterRhs,
-                subproblemLhs, subproblemRhs, masterConstraints, masterTotalVars) =
+                subproblemLhs, subproblemRhs, masterConstraints, masterTotalVars, masterVarNames, subVarNames, W) =
                     ExtractMasterAndSubproblemData(
                         allVariables,
                         objectiveCoefficients,
                         lhsMatrix,
                         rhsMatrix,
-                        masterVariables);
+                        masterVariables,
+                        numScenarios);
 
-            /*
-            //6. L-shaped
-            double UB = double.PositiveInfinity; // Upper Bound
-            double LB = double.NegativeInfinity; // Lower Bound
-            int iteration = 0;
-
-            // L-Shape Method: 迭代過程
-            while (Math.Abs(UB - LB) > 1e-6) // 停止條件：UB 和 LB 足夠接近
+            //6.L-shaped method並且根據每一次迭代跑一個h_k,q_k,T_k(所以會在scenario的迴圈中每次跑)
+            for (int s = 0; s < numScenarios; s++)
             {
-                iteration++;
-                // Check whether is complete recourse
-                // 判斷是否為 Complete Recourse
-                bool isCompleteRecourse = true;
+                var (H, Q, T) = ExtractHAndQAndT(
+                                subproblemCoefficients,
+                                subproblemLhs,
+                                subproblemRhs,
+                                masterVarNames,
+                                subVarNames,
+                                allVariables,
+                                s,
+                                numScenarios);
+            }
 
-                // 檢查 Master Variables 是否包含 w 或 y 變數
-                foreach (var variable in masterVariables)
+            //====================Some functions================================
+            (List<double>, List<double>, List<List<double>>) ExtractHAndQAndT(
+        double[] subproblemCoefficients,
+        double[,] subproblemLhs,
+        double[] subproblemRhs,
+        List<string> masterVarNames,
+        List<string> subVarNames,
+        List<string> allVariables,
+        int s,
+        int numScenarios)
+            {
+                List<double> H = new List<double>();
+                List<double> Q = new List<double>();
+
+                // Extract H for the current scenario
+                for (int i = 0; i < subproblemRhs.Length / numScenarios; i++)
                 {
-                    string trimmedVariable = variable.Trim();
-                    if (trimmedVariable.StartsWith("w_") || trimmedVariable.StartsWith("y_"))
+                    H.Add(subproblemRhs[s * (subproblemRhs.Length / numScenarios) + i]);
+                }
+
+                // Extract Q for the target variables
+                List<string> firstTargetVariables = new List<string>();
+
+                foreach (string varName in subVarNames)
+                {
+                    // Dynamically generate the variable names for the current scenario
+                    string[] targetVariables =
                     {
-                        isCompleteRecourse = false;
-                        break;
+                    $"x_{s+1}",
+                    $"y_1_{s+1}",
+                    $"y_2_{s+1}",
+                    $"w_1_{s+1}",
+                    $"w_2_{s+1}",
+                    $"w_3_{s+1}",
+                    $"w_4_{s+1}"
+                    };
+
+                    if (targetVariables.Contains(varName))
+                    {
+                        firstTargetVariables.Add(varName);
+                    }
+
+                }
+ 
+                foreach (string varName in firstTargetVariables)
+                {
+                    int varIndex = allVariables.IndexOf(varName);
+                     Q.Add(subproblemCoefficients[varIndex]);
+
+                }
+
+                // T: 用雙維 List 代替二維陣列
+                int nrowT = subproblemRhs.Length / numScenarios;//4
+                int ncolT = masterVarNames.Count;  // Subproblem 變數的數量//3
+                List<List<double>> T = new List<List<double>>();
+
+                // 初始化 T 的每一行
+                for (int i = 0; i < nrowT; i++)
+                {
+                    T.Add(new List<double>());
+                    for (int j = 0; j < ncolT; j++)
+                    {
+                        T[i].Add(0);  // 為每個元素添加預設值
                     }
                 }
 
-                // 解決 Master Problem
-                Console.WriteLine("\nSolving Master Problem...");
-                //SolveUsingPrimalSimplex(masterLhs, masterRhs, masterCoefficients, masterTotalVars, masterConstraints);
-
-                // 根據判斷結果進行處理
-                if (isCompleteRecourse)
+                // 填充 T: 這是 masterVarNames 對應於 subproblemLhs 的值
+                for (int col = 0; col < masterVarNames.Count; col++)  // 迭代每個 master 變數
                 {
-                    Console.WriteLine("\nComplete Recourse detected. Only Optimal Cut will be performed in each iteration.");
-                    //optimalcut function
+                    // 取得對應的 Master 變數名稱
+                    string masterVar = masterVarNames[col];
 
+                    // 根據場景 (s) 填充對應的 T 矩陣
+                    for (int row = 0; row < nrowT; row++) 
+                    {
+                        // subproblemLhs 的行和列索引計算方式根據場景來調整
+                        T[row][col] = subproblemLhs[nrowT * s  + row, col];  // 使用場景 s 對應的 LHS 值
+                    }
                 }
-                else
+
+                // Print H and Q
+                Console.WriteLine($"Scenario {s + 1} H:");
+                foreach (var h in H)
                 {
-                    Console.WriteLine("\nNot Complete Recourse. Feasibility Cut and Optimal Cut will be performed in each iteration.");
-                    //feasibility function
-                    //optimalcut function
+                    Console.WriteLine(h);
                 }
+
+                Console.WriteLine($"Scenario {s + 1} Q:");
+                foreach (var q in Q)
+                {
+                    Console.WriteLine(q);
+                }
+
+                Console.WriteLine($"Scenario {s + 1} T matrix:");
+                for (int i = 0; i < nrowT; i++)
+                {
+                    for (int j = 0; j < ncolT; j++)
+                    {
+                        Console.Write($"{T[i][j]} ");
+                    }
+                    Console.WriteLine();
+                }
+
+                return (H, Q, T);
             }
-            */
-
-            //====================Some functions================================
             static (double[] masterCoefficients, double[] subproblemCoefficient,
             double[,] masterLhs, double[] masterRhs,
             double[,] subproblemLhs, double[] subproblemRhs,
-            int masterConstraints, int masterTotalVars)
+            int masterConstraints, int masterTotalVars, List<string> masterVarNames, List<string> subVarNames, double[,] W)
             ExtractMasterAndSubproblemData(
             List<string> allVariables, double[] objectiveCoefficients,
-            double[,] lhsMatrix, double[] rhsMatrix, string[] masterVariables)
+            double[,] lhsMatrix, double[] rhsMatrix, string[] masterVariables, int numScenarios)
             {
 
+                    // Extract master LHS and RHS only for master variables
+                    var masterSelectedRows = new List<int>(); // Master 限制式行索引
+                    var subproblemSelectedRows = new List<int>(); // Subproblem 限制式行索引
 
-                // Extract master LHS and RHS only for master variables
-                var masterSelectedRows = new List<int>(); // Master 限制式行索引
-                var subproblemSelectedRows = new List<int>(); // Subproblem 限制式行索引
-
-                for (int i = 0; i < lhsMatrix.GetLength(0); i++) // 遍歷所有限制式行
-                {
-                    bool isMasterRow = true;
-
-                    for (int j = 0; j < lhsMatrix.GetLength(1); j++) // 遍歷行中所有變數
+                    for (int i = 0; i < lhsMatrix.GetLength(0); i++) // 遍歷所有限制式行
                     {
-                        // 如果 LHS 行中存在非零係數，但變數不屬於 Master Variables，則該行不屬於 Master Problem
-                        if (lhsMatrix[i, j] != 0 && !masterVariables.Contains(allVariables[j]))
+                        bool isMasterRow = true;
+
+                        for (int j = 0; j < lhsMatrix.GetLength(1); j++) // 遍歷行中所有變數
                         {
-                            isMasterRow = false;
-                            break;
+                            // 如果 LHS 行中存在非零係數，但變數不屬於 Master Variables，則該行不屬於 Master Problem
+                            if (lhsMatrix[i, j] != 0 && !masterVariables.Contains(allVariables[j]))
+                            {
+                                isMasterRow = false;
+                                break;
+                            }
+                        }
+
+                        if (isMasterRow)
+                        {
+                            masterSelectedRows.Add(i);
+                        }
+                        else
+                        {
+                            subproblemSelectedRows.Add(i);
+                        }
+                    }
+                    var masterVarNames = new List<string>(); // 儲存 Master Problem 的變數名稱
+                    var subVarNames = new List<string>();    // 儲存 Subproblem 的變數名稱
+
+                    // 獲取 Master 和 Subproblem 的變數名稱
+                    foreach (var variable in allVariables)
+                    {
+                        if (masterVariables.Contains(variable))
+                        {
+                            masterVarNames.Add(variable); // 加入 Master Problem 的變數名稱
+                        }
+                        else
+                        {
+                            subVarNames.Add(variable); // 加入 Subproblem 的變數名稱
                         }
                     }
 
-                    if (isMasterRow)
+                    // 構建 Master Problem 的 LHS 和 RHS
+                    // Master constraints and total variables
+                    int masterConstraints = masterSelectedRows.Count;
+                    int masterSlackVariables = masterConstraints;
+                    int masterTotalVars = lhsMatrix.GetLength(1) + masterSlackVariables;
+                    double[,] masterLhs = new double[masterConstraints, masterTotalVars];
+                    double[] masterRhs = new double[masterConstraints];
+
+                    for (int i = 0; i < masterSelectedRows.Count; i++)
                     {
-                        masterSelectedRows.Add(i);
+                        int rowIndex = masterSelectedRows[i];
+                        for (int j = 0; j < lhsMatrix.GetLength(1); j++)
+                        {
+                            masterLhs[i, j] = lhsMatrix[rowIndex, j];
+                        }
+                        // 填充 Slack Variables (對角線)
+                        masterLhs[i, lhsMatrix.GetLength(1) + i] = 1;
+
+                        masterRhs[i] = rhsMatrix[rowIndex];
                     }
-                    else
+
+                    // 構建 Subproblem 的 LHS 和 RHS
+                    int subproblemConstraints = subproblemSelectedRows.Count;
+                    int subproblemSlackVariables = subproblemConstraints;
+
+                    double[,] subproblemLhs = new double[subproblemConstraints, lhsMatrix.GetLength(1) + subproblemSlackVariables];
+                    double[] subproblemRhs = new double[subproblemSelectedRows.Count];
+
+                    for (int i = 0; i < subproblemSelectedRows.Count; i++)
                     {
-                        subproblemSelectedRows.Add(i);
+                        int rowIndex = subproblemSelectedRows[i];
+                        for (int j = 0; j < lhsMatrix.GetLength(1); j++)
+                        {
+                            subproblemLhs[i, j] = lhsMatrix[rowIndex, j];
+                        }
+                        // 填充 Slack Variables (對角線)
+                        subproblemLhs[i, lhsMatrix.GetLength(1) + i] = 1;
+                        subproblemRhs[i] = rhsMatrix[rowIndex];
                     }
-                }
 
-                // 構建 Master Problem 的 LHS 和 RHS
-                // Master constraints and total variables
-                int masterConstraints = masterSelectedRows.Count;
-                int masterSlackVariables = masterConstraints;
-                int masterTotalVars = lhsMatrix.GetLength(1) + masterSlackVariables;
-                double[,] masterLhs = new double[masterConstraints, masterTotalVars];
-                double[] masterRhs = new double[masterConstraints];
+                    // 構建 W
+                    int nrowW = subproblemConstraints / numScenarios;
+                    int ncolW = subVarNames.Count / numScenarios; // Subproblem 變數的數量
+                    double[,] W = new double[nrowW, ncolW];
+                    // 初始化 firstTargetVariables 為 List 以便存放符合條件的變數
+                    List<string> firstTargetVariables = new List<string>();
+                    // 目標變數
+                    string[] targetVariables = { "x_1", "y_1_1", "y_2_1", "w_1_1", "w_2_1", "w_3_1", "w_4_1" };
 
-                for (int i = 0; i < masterSelectedRows.Count; i++)
-                {
-                    int rowIndex = masterSelectedRows[i];
-                    for (int j = 0; j < lhsMatrix.GetLength(1); j++)
+                    // 遍歷 subVarNames，並檢查是否包含在 targetVariables 中
+                    foreach (string varName in subVarNames)
                     {
-                        masterLhs[i, j] = lhsMatrix[rowIndex, j];
+                        if (targetVariables.Contains(varName))
+                        {
+                            firstTargetVariables.Add(varName);
+                        }
                     }
-                    // 填充 Slack Variables (對角線)
-                    masterLhs[i, lhsMatrix.GetLength(1) + i] = 1;
 
-                    masterRhs[i] = rhsMatrix[rowIndex];
-                }
-
-                // 構建 Subproblem 的 LHS 和 RHS
-                int subproblemConstraints = subproblemSelectedRows.Count;
-                int subproblemSlackVariables = subproblemConstraints;
-
-                double[,] subproblemLhs = new double[subproblemConstraints, lhsMatrix.GetLength(1) + subproblemSlackVariables];
-                double[] subproblemRhs = new double[subproblemSelectedRows.Count];
-
-                for (int i = 0; i < subproblemSelectedRows.Count; i++)
-                {
-                    int rowIndex = subproblemSelectedRows[i];
-                    for (int j = 0; j < lhsMatrix.GetLength(1); j++)
+                    // 填充 W 矩陣
+                    for (int i = 0; i < nrowW; i++)
                     {
-                        subproblemLhs[i, j] = lhsMatrix[rowIndex, j];
-                    }
-                    // 填充 Slack Variables (對角線)
-                    subproblemLhs[i, lhsMatrix.GetLength(1) + i] = 1;
-                    subproblemRhs[i] = rhsMatrix[rowIndex];
-                }
+                        // 遍歷 firstTargetVariables 中的每一個目標變數
+                        for (int j = 0; j < firstTargetVariables.Count; j++)
+                        {
+                            // 獲取目標變數 varName 的索引
+                            string varName = firstTargetVariables[j];
 
+                            // 確保 allVariables 中包含該變數
+                            int varIndex = allVariables.IndexOf(varName);
+
+                            // 確保索引有效
+                            if (varIndex >= 0)
+                            {
+                                // 填充 W 矩陣，對應的位置從 subproblemLhs 中取值
+                                W[i, j] = subproblemLhs[i, varIndex];
+                            }
+                        }
+                    }
+                
                 var masterCoefficients = new double[objectiveCoefficients.Length + masterConstraints];
                 var subproblemCoefficients = new double[objectiveCoefficients.Length + masterConstraints];
                 var masterSet = new HashSet<string>(masterVariables.Select(s => s.Trim()));
@@ -247,7 +375,7 @@ namespace StochasticFarmerProblem
 
                 return (masterCoefficients, subproblemCoefficients,
                     masterLhs, masterRhs, subproblemLhs, subproblemRhs,
-                    masterConstraints, masterTotalVars);
+                    masterConstraints, masterTotalVars, masterVarNames, subVarNames, W);
 
             }
 
@@ -449,6 +577,18 @@ namespace StochasticFarmerProblem
             {
                 Console.WriteLine($"{rhs:F2}");
             }
+
+            Console.WriteLine("\n W:");
+            for (int i = 0; i < W.GetLength(0); i++)
+            {
+                for (int j = 0; j < W.GetLength(1); j++)
+                {
+                    Console.Write($"{W[i, j],8:F2} ");
+                }
+                Console.WriteLine();
+            }
+
+
 
             // Solve Using Primal Simplex Method
             static void SolveUsingPrimalSimplex(double[,] lhs, double[] rhs,
