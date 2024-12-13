@@ -1,582 +1,677 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Linq;
 
-namespace StochasticFarmerProblem
+namespace FarmerLShapedNoILOG
 {
-    // Class to store variable info
-    class Variable
+    class Program
     {
-        public string Name { get; set; }
-        public double Value { get; set; }
-        public bool IsSlack { get; set; } // To identify slack variables
-        public Variable(string name, bool isSlack = false) { Name = name; Value = 0.0; IsSlack = isSlack; }
-    }
+        // Original farmer problem variables in order: [x1, x2, x3, y1, y2, w1, w2, w3, w4, theta]
+        // We add 'theta' for L-shaped method
 
-    class BendersDecomposition
-    {
+        // Master constraints: user picks which constraints go in master.
+        // The rest + scenario yield logic goes to subproblem.
+
+        // Let's store the original problem constraints in a data structure:
+        static double[,] originalLHS = new double[5, 10];  // 5 constraints, 10 vars
+        static double[] originalRHS = new double[5];
+        static string[] consLabels = {"C1","C2","C3","C4","C5"};
+        static Dictionary<string,int> consIndexMap = new Dictionary<string,int>{{"C1",0},{"C2",1},{"C3",2},{"C4",3},{"C5",4}};
+        static List<string> allVars = new List<string>{"x_1","x_2","x_3","y_1","y_2","w_1","w_2","w_3","w_4","theta"};
+
+        // Objective coefficients (original):
+        static Dictionary<string,double> varObj = new Dictionary<string,double>{
+            {"x_1",150},{"x_2",230},{"x_3",260},
+            {"y_1",238},{"y_2",210},
+            {"w_1",-170},{"w_2",-150},{"w_3",-36},{"w_4",-10},
+            {"theta",0.0}
+        };
+
+        // For subproblem solutions, we need subproblem objective only for {y,w}:
+        // But here we define subObj for {y1,y2,w1,w2,w3,w4} (the subproblem variables).
+        // The code will unify them from varObj.
+
         static void Main(string[] args)
         {
-            Console.WriteLine("Enter the number of scenarios:");
+            // (1) Print Original Problem
+            PrintOriginalProblem();
+
+            // Fill the original constraints LHS, RHS
+            // C1: x1+x2+x3 ≤ 500
+            originalLHS[0,0]=1; originalLHS[0,1]=1; originalLHS[0,2]=1; originalRHS[0]=500;
+            // C2: 2.5x1 + y1 - w1≥200 => -2.5x1 -y1 +w1 ≤ -200
+            originalLHS[1,0]=-2.5; originalLHS[1,3]=-1; originalLHS[1,5]=1; originalRHS[1]=-200;
+            // C3: 3x2 + y2 - w2≥240 => -3x2 -y2 + w2 ≤ -240
+            originalLHS[2,1]=-3; originalLHS[2,4]=-1; originalLHS[2,6]=1; originalRHS[2]=-240;
+            // C4: w3+w4 ≤20x3 => w3+w4 -20x3≤0
+            originalLHS[3,7]=1; originalLHS[3,8]=1; originalLHS[3,2]=-20; originalRHS[3]=0;
+            // C5: w3 ≤6000
+            originalLHS[4,7]=1; originalRHS[4]=6000;
+
+            // (2) Let user pick constraints for the master
+            Console.WriteLine("\nEnter constraints for master (e.g. C1,C2...):");
+            string inputCons=Console.ReadLine();
+            string[] chosenConsStr = inputCons.Split(',').Select(s=>s.Trim().ToUpper()).Where(s=>s!="").ToArray();
+            HashSet<int> chosenConsIdx=new HashSet<int>();
+            foreach(var c in chosenConsStr)
+            {
+                if(!consIndexMap.ContainsKey(c))
+                {
+                    Console.WriteLine($"Constraint {c} not found. Stop.");
+                    return;
+                }
+                chosenConsIdx.Add(consIndexMap[c]);
+            }
+
+            // (3) Let user define number of scenarios
+            Console.WriteLine("Enter number of scenarios:");
             int numScenarios;
-            while (!int.TryParse(Console.ReadLine(), out numScenarios) || numScenarios <= 0)
+            while(!int.TryParse(Console.ReadLine(), out numScenarios) || numScenarios<=0)
             {
-                Console.WriteLine("Invalid input. Enter positive integer for scenarios:");
+                Console.WriteLine("Invalid input. Re-enter number of scenarios:");
             }
 
-            // Generate all variables (x_1,x_2,x_3 for first-stage, y_1_s,y_2_s,w_1_s,... for second-stage)
-            List<string> allVariables = GenerateAllVariables(numScenarios);
+            // Build Master Problem
+            (double[,] masterLHS, double[] masterRHS, double[] masterCoeffs, List<string> masterVarNames) =
+                BuildMasterProblemData(chosenConsIdx);
 
-            Console.WriteLine("\nAll Variables:");
-            foreach (var v in allVariables) Console.Write(v + " ");
-            Console.WriteLine();
+            // We'll do a primal simplex approach for the master problem, so let's keep it in memory.
+            // master dimension:
+            int masterCons = masterRHS.Length;
+            int masterVarsCount = masterCoeffs.Length;
 
-            Console.WriteLine("\nEnter variables to include in the master problem (comma-separated):");
-            string inputVars = Console.ReadLine();
-            string[] masterVars = inputVars.Split(',').Select(s => s.Trim()).Where(s => s != "").ToArray();
+            // Subproblem constraints = the constraints not chosen
+            List<int> subConsIndices=new List<int>();
+            for(int i=0;i<5;i++)
+                if(!chosenConsIdx.Contains(i)) subConsIndices.Add(i);
 
-            // Build full objective and constraints
-            double[] fullObj = BuildObjectiveCoefficients(allVariables, numScenarios);
-            double[,] fullLHS = BuildFullLHS(allVariables, numScenarios);
-            double[] fullRHS = BuildFullRHS(numScenarios);
-
-            // Extract master data
-            var masterData = ExtractMasterData(allVariables, fullObj, fullLHS, fullRHS, masterVars);
-            double[] masterCoefficients = masterData.masterCoefficients;
-            double[,] masterLHS = masterData.masterLHS;
-            double[] masterRHS = masterData.masterRhs;
-            int masterCons = masterData.masterCons;
-            int masterTotalVars = masterData.masterTotalVars;
-            string[] masterVarNames = masterData.masterVarNames;
-            List<int> masterVarIndices = masterData.masterVarIndices;
-
-            // Check complete recourse
-            bool isCompleteRecourse = CheckCompleteRecourse(masterVars);
-
-            // Scenario multipliers
-            double[] scenarioMultipliers = ComputeScenarioMultipliers(numScenarios);
-
-            double UB = double.PositiveInfinity;
-            double LB = double.NegativeInfinity;
-            double tolerance = 1e-6;
-            int maxIterations = 50;
-            int scenarioIndex = 0;
-
-            // L-shaped method iteration
-            for (int iteration = 1; iteration <= maxIterations; iteration++)
+            // Subproblem variables = the original minus the master var set (and "theta")
+            // We find the name "theta" or slack not in subproblem
+            HashSet<string> masterVarSet = new HashSet<string>(masterVarNames);
+            List<int> subVarIndices=new List<int>();
+            for(int idx=0; idx<allVars.Count; idx++)
             {
-                Console.WriteLine($"\n--- Benders Iteration {iteration} ---");
-
-                var masterRes = SolveUsingPrimalSimplex(masterLHS, masterRHS, masterCoefficients, masterTotalVars, masterCons);
-                if (!masterRes.feasible)
+                string v=allVars[idx];
+                if(!masterVarSet.Contains(v) && !v.StartsWith("slack_") && v!="theta")
                 {
-                    Console.WriteLine("Master infeasible. Stopping.");
+                    subVarIndices.Add(idx);
+                }
+            }
+
+            // Check complete recourse: If user picks any constraint that has y_ or w_ => not complete recourse
+            bool isCompleteRecourse=true;
+            foreach(int ci in chosenConsIdx)
+            {
+                // Check if that constraint includes any y_ or w_
+                for(int j=0;j<10;j++)
+                {
+                    if(Math.Abs(originalLHS[ci,j])>1e-15)
+                    {
+                        string varName=allVars[j];
+                        if(varName.StartsWith("y_")||varName.StartsWith("w_"))
+                            isCompleteRecourse=false;
+                    }
+                }
+            }
+
+            // (4) Build scenario yields from 80% ~120%
+            double[] scenarioMultipliers=ComputeScenarioMultipliers(numScenarios);
+
+            // L-shaped iteration
+            double UB=double.PositiveInfinity;
+            double LB=double.NegativeInfinity;
+            double prevTheta= double.NegativeInfinity;
+            bool optimalFound=false;
+            int maxIter=50;
+
+            // We'll store the master tableau for primal simplex:
+            (double[,] masterTableau, double[] masterRHSVec, double[] masterObjVec)= BuildMasterTableau(masterLHS, masterRHS, masterCoeffs);
+
+            int idxTheta=-1; // identify "theta" in masterVarNames
+            for(int i=0;i<masterVarNames.Count;i++)
+            {
+                if(masterVarNames[i]=="theta")
+                {
+                    idxTheta=i;break;
+                }
+            }
+            if(idxTheta<0)
+            {
+                Console.WriteLine("No 'theta' in master? That breaks L-shaped logic. Stop.");
+                return;
+            }
+
+            double[] lastMasterSolution=null;
+            for(int iteration=1; iteration<=maxIter; iteration++)
+            {
+                Console.WriteLine($"\n--- L-Shaped Iteration {iteration} ---");
+                var masterRes=PrimalSimplexSolveFull(masterTableau, masterRHSVec, masterObjVec);
+                if(!masterRes.feasible)
+                {
+                    Console.WriteLine("Master infeasible. Stop iteration.");
+                    break;
+                }
+                double[] mSol= masterRes.solution;
+                double objVal= masterRes.objVal;
+                // Print master solution
+                Console.WriteLine("Master solution:");
+                for(int v=0;v<masterVarNames.Count;v++)
+                {
+                    Console.WriteLine($"{masterVarNames[v]}={mSol[v]:F2}");
+                }
+                Console.WriteLine($"MasterObj={objVal:F2}");
+
+                UB=Math.Min(UB,objVal);
+                double thetaVal=mSol[idxTheta];
+
+                // Solve subproblems
+                bool anyFeasCut=false;
+                double totalScenarioCost=0.0;
+                for(int s=0;s<numScenarios;s++)
+                {
+                    double multiplier= scenarioMultipliers[s];
+                    double wheatYield=2.5*multiplier;
+                    double cornYield=3.0*multiplier;
+                    double sugarYield=20.0*multiplier;
+
+                    var sp= SolveSubproblemScenario(mSol,masterVarNames, subConsIndices, subVarIndices, 
+                             wheatYield, cornYield, sugarYield, isCompleteRecourse);
+                    if(!sp.feasible && !isCompleteRecourse)
+                    {
+                        anyFeasCut=true;
+                        AddFeasibilityCutSimple(ref masterTableau,ref masterRHSVec,ref masterObjVec,masterVarNames);
+                        Console.WriteLine("Feasibility cut added!");
+                        break;
+                    }
+                    else if(!sp.feasible && isCompleteRecourse)
+                    {
+                        Console.WriteLine("Infeasible scenario under complete recourse?? Contradiction. Stop.");
+                        anyFeasCut=true;
+                        break;
+                    }
+                    else
+                    {
+                        totalScenarioCost+= sp.cost*(1.0/numScenarios);
+                    }
+                }
+                if(anyFeasCut) continue;
+
+                // All scenario feasible
+                if(!double.IsNegativeInfinity(prevTheta))
+                {
+                    double diff=Math.Abs(thetaVal - prevTheta);
+                    if(diff<1e-6)
+                    {
+                        Console.WriteLine("Theta converged => stop iteration.");
+                        optimalFound=true;
+                        break;
+                    }
+                }
+                prevTheta=thetaVal;
+
+                double w_v=totalScenarioCost;
+                if(thetaVal>=w_v-1e-6)
+                {
+                    LB=Math.Max(LB,thetaVal);
+                    if(Math.Abs(UB-LB)<1e-6)
+                    {
+                        Console.WriteLine("Converged: UB ~ LB");
+                        optimalFound=true;
+                        break;
+                    }
+                }
+                else
+                {
+                    // Add optimality cut: theta >= w_v => (theta - w_v >=0)
+                    // We'll do that with primal approach by adding a row
+                    AddOptimalityCut(ref masterTableau,ref masterRHSVec,ref masterObjVec, idxTheta, w_v, masterVarNames.Count);
+                    Console.WriteLine("Optimality cut added!");
+                }
+            }
+
+            if(optimalFound)
+            {
+                // final solution
+                var final=PrimalSimplexSolveFull(masterTableau,masterRHSVec,masterObjVec);
+                if(final.feasible)
+                {
+                    Console.WriteLine("\n--- Final Master Solution ---");
+                    double[] sol=final.solution;
+                    double fObj=final.objVal;
+                    for(int i=0;i<masterVarNames.Count;i++)
+                    {
+                        if(!masterVarNames[i].StartsWith("slack_"))
+                            Console.WriteLine($"{masterVarNames[i]}={sol[i]:F2}");
+                    }
+                    Console.WriteLine($"Objective={fObj:F2}");
+                }
+            }
+            else
+            {
+                Console.WriteLine("Max iteration or no converge reached.");
+            }
+
+            // Print Advice
+            Console.WriteLine("\n--- Advice ---");
+            Console.WriteLine("1) This code uses an internal primal simplex approach for both master and subproblems.");
+            Console.WriteLine("2) If user-chosen constraints do not include any y_/w_, the problem is complete recourse => no feasibility cuts needed.");
+            Console.WriteLine("3) For accurate L-shaped cuts, we typically gather subproblem dual multipliers. Here we used a direct subproblem cost (w_v).");
+            Console.WriteLine("4) You can refine the logic by forming feasibility/optimality cuts from the subproblem dual solutions for a robust solution.");
+        }
+
+        // Build Master Problem Data:
+        static (double[,] lhs, double[] rhs, double[] coeffs, List<string> varNames)
+        BuildMasterProblemData(HashSet<int> chosenConsIdx)
+        {
+            // gather all vars from chosen constraints + "theta"
+            int thetaIndex= allVars.IndexOf("theta");
+            HashSet<int> masterVarIndices=new HashSet<int>();
+            foreach(int ci in chosenConsIdx)
+            {
+                for(int j=0;j<10;j++)
+                {
+                    if(Math.Abs(originalLHS[ci,j])>1e-15)
+                        masterVarIndices.Add(j);
+                }
+            }
+            masterVarIndices.Add(thetaIndex);
+
+            List<int> mList=new List<int>(masterVarIndices);
+            mList.Sort();
+            int masterCons=chosenConsIdx.Count;
+            int slack= masterCons;
+            int totalVars= mList.Count + slack;
+
+            double[,] masterLHS=new double[masterCons, totalVars];
+            double[] masterRHS=new double[masterCons];
+            List<string> masterVarNames=new List<string>();
+            for(int j=0;j<mList.Count;j++)
+            {
+                masterVarNames.Add(allVars[mList[j]]);
+            }
+            for(int i=0;i<masterCons;i++)
+            {
+                masterVarNames.Add($"slack_{i+1}");
+            }
+
+            int row=0;
+            foreach(int ci in chosenConsIdx)
+            {
+                for(int j=0;j<mList.Count;j++)
+                {
+                    masterLHS[row,j]= originalLHS[ci,mList[j]];
+                }
+                masterLHS[row,mList.Count+row]=1.0;
+                masterRHS[row]=originalRHS[ci];
+                row++;
+            }
+
+            // build master objective
+            double[] masterCoeffs=new double[totalVars];
+            for(int j=0;j<mList.Count;j++)
+            {
+                string v=allVars[mList[j]];
+                masterCoeffs[j]= varObj[v];
+            }
+            for(int i=0;i<masterCons;i++)
+            {
+                masterCoeffs[mList.Count+i]=0.0;
+            }
+
+            return (masterLHS, masterRHS, masterCoeffs, masterVarNames);
+        }
+
+        // Build initial tableau for primal simplex
+        static (double[,] lhs,double[] rhs,double[] obj) BuildMasterTableau(double[,] masterLHS, double[] masterRHS, double[] masterCoeffs)
+        {
+            int m=masterRHS.Length;  // #constraints
+            int tvars=masterCoeffs.Length; //#vars
+            // We'll transform Ax ≤ b into a tableau form
+            // The last m columns will be the slack variables, presumably an identity basis.
+            double[,] lhs=new double[m,tvars];
+            double[] rhs=new double[m];
+            double[] obj=new double[tvars];
+            for(int i=0;i<m;i++)
+            {
+                for(int j=0;j<tvars;j++)
+                {
+                    lhs[i,j]=masterLHS[i,j];
+                }
+                rhs[i]=masterRHS[i];
+            }
+            for(int j=0;j<tvars;j++)
+                obj[j]=masterCoeffs[j];
+            return (lhs,rhs,obj);
+        }
+
+        // Solve subproblem scenario with internal approach
+        // For demonstration, we do a direct approach:
+        // subproblem constraints = subConsIndices with yield variations substituted
+        // subproblem objective from varObj for subVarIndices
+        public struct SubproblemResult {public bool feasible;public double cost; }
+        static SubproblemResult SolveSubproblemScenario(double[] masterSolVal,List<string> masterVarNames,
+            List<int> subConsIndices,List<int> subVarIndices, double wheatYield, double cornYield, double sugarYield,
+            bool isCompleteRecourse)
+        {
+            // Build subproblem tableau
+            // subproblem constraints => subConsIndices
+            // subproblem variables => subVarIndices
+            // objective => sum(varObj[vName]*subVar)
+            // For demonstration: we'll treat constraints as ≤ form, add slack => BFS
+            // Then do primal simplex.
+
+            // Build LHS,RHS for subproblem
+            int subM=subConsIndices.Count;
+            int subVarCount= subVarIndices.Count;
+            double[,] subLHS=new double[subM, subVarCount + subM];
+            double[] subRHS=new double[subM];
+            double[] subObj=new double[subVarCount + subM];
+
+            for(int j=0;j<subVarCount;j++)
+            {
+                string v= allVars[subVarIndices[j]];
+                subObj[j]= varObj[v];
+            }
+            for(int i=0;i<subM;i++) subObj[subVarCount+i]=0.0;
+
+            for(int i=0;i<subM;i++)
+            {
+                int ci=subConsIndices[i];
+                double[] cRow=new double[10];
+                for(int kk=0;kk<10;kk++) cRow[kk]=originalLHS[ci,kk];
+                double cRHS= originalRHS[ci];
+
+                // Adjust yields:
+                if(ci==1) cRow[0]=-wheatYield; //C2
+                if(ci==2) cRow[1]=-cornYield;  //C3
+                if(ci==3) cRow[2]=-sugarYield; //C4
+
+                // Sub out master variables
+                double hVal=cRHS;
+                for(int mv=0; mv<masterVarNames.Count; mv++)
+                {
+                    string varM= masterVarNames[mv];
+                    int globalIdx= allVars.IndexOf(varM);
+                    if(globalIdx>=0 && Math.Abs(cRow[globalIdx])>1e-15)
+                    {
+                        hVal-= cRow[globalIdx]*masterSolVal[mv];
+                        cRow[globalIdx]=0.0;
+                    }
+                }
+
+                // Fill subLHS row
+                for(int j=0;j<subVarCount;j++)
+                {
+                    int globalID=subVarIndices[j];
+                    subLHS[i,j]= cRow[globalID];
+                }
+                subLHS[i, subVarCount+i]=1.0; // slack
+                subRHS[i]=hVal;
+            }
+
+            // Now primal simplex
+            var spTableau= BuildSubproblemTableau(subLHS, subRHS, subObj, subM, subVarCount);
+            var spRes=PrimalSimplexSolveFull(spTableau.lhs, spTableau.rhs, spTableau.obj);
+            SubproblemResult result = new SubproblemResult();
+            result.feasible= spRes.feasible;
+            if(!spRes.feasible) 
+            {
+                result.cost=Double.PositiveInfinity;
+                return result;
+            }
+            result.cost= spRes.objVal;
+            return result;
+        }
+
+        static (double[,] lhs,double[] rhs,double[] obj) BuildSubproblemTableau(double[,] subLHS,double[] subRHS,double[] subObj,int subM,int subVarCount)
+        {
+            // subproblem total vars = subVarCount + subM
+            // We'll transform them into a tableau
+            int totalVars=subVarCount+subM;
+            double[,] lhs=new double[subM,totalVars];
+            double[] rhs=new double[subM];
+            double[] obj=new double[totalVars];
+            for(int i=0;i<subM;i++)
+            {
+                for(int j=0;j<totalVars;j++)
+                    lhs[i,j]=subLHS[i,j];
+                rhs[i]=subRHS[i];
+            }
+            for(int j=0;j<totalVars;j++)
+                obj[j]=subObj[j];
+
+            return (lhs,rhs,obj);
+        }
+
+        // Primal Simplex result
+        public struct SimplexResult
+        {
+            public bool feasible;
+            public double[] solution;
+            public double objVal;
+        }
+
+        // Full primal simplex solver 
+        static SimplexResult PrimalSimplexSolveFull(double[,] lhs,double[] rhs,double[] obj)
+        {
+            // We assume Ax <= b, all vars≥0, slack provides BFS
+            // We'll do standard primal simplex approach
+            // The # of constraints = m
+            // The # of total vars = n
+            int m=rhs.Length;
+            int n=obj.Length;
+            // Make a local copy so we don't mutate the original arrays
+            double[,] A=new double[m,n];
+            double[] B=new double[m];
+            double[] c=new double[n];
+            for(int i=0;i<m;i++)
+            {
+                B[i]=rhs[i];
+                for(int j=0;j<n;j++)
+                    A[i,j]=lhs[i,j];
+            }
+            for(int j=0;j<n;j++)
+                c[j]=obj[j];
+
+            // Basic variables = last m columns (the slacks)
+            int[] basicVar = new int[m];
+            for(int i=0;i<m;i++)
+            {
+                basicVar[i]=n-m+i;
+            }
+
+            // iteration
+            while(true)
+            {
+                // compute dual pi from basicVar
+                double[] pi=new double[m];
+                for(int i=0;i<m;i++)
+                {
+                    pi[i]= c[basicVar[i]];
+                }
+
+                // compute reduced cost
+                double maxRC=0.0; int entering=-1;
+                double[] redCost=new double[n];
+                for(int j=0;j<n;j++)
+                {
+                    redCost[j]= c[j];
+                    for(int i=0;i<m;i++)
+                        redCost[j]-= pi[i]*A[i,j];
+                    if(redCost[j]>maxRC)
+                    {
+                        maxRC=redCost[j];
+                        entering=j;
+                    }
+                }
+                if(entering==-1) 
+                {
+                    // optimal
                     break;
                 }
 
-                LB = masterRes.objVal;
-                double[] masterSol = masterRes.solution;
-
-                // Choose scenario
-                int s = scenarioIndex;
-                scenarioIndex = (scenarioIndex + 1) % numScenarios;
-
-                // Extract x_1,x_2,x_3,theta
-                double x1 = 0, x2 = 0, x3 = 0, thetaVal = 0;
-                Dictionary<string, double> masterSolutionMap = new Dictionary<string, double>();
-                for (int i = 0; i < masterVarNames.Length; i++)
+                // ratio test
+                double minRatio=Double.MaxValue;
+                int leaving=-1;
+                for(int i=0;i<m;i++)
                 {
-                    masterSolutionMap[masterVarNames[i]] = masterSol[i];
-                    if (masterVarNames[i] == "x_1") x1 = masterSol[i];
-                    else if (masterVarNames[i] == "x_2") x2 = masterSol[i];
-                    else if (masterVarNames[i] == "x_3") x3 = masterSol[i];
-                    else if (masterVarNames[i] == "theta") thetaVal = masterSol[i];
+                    if(A[i,entering]>1e-15)
+                    {
+                        double ratio= B[i]/A[i,entering];
+                        if(ratio<minRatio)
+                        {
+                            minRatio=ratio;
+                            leaving=i;
+                        }
+                    }
+                }
+                if(leaving==-1)
+                {
+                    // unbounded
+                    SimplexResult res=new SimplexResult();
+                    res.feasible=false;
+                    res.solution=null;
+                    res.objVal=Double.PositiveInfinity;
+                    return res;
                 }
 
-                // Solve subproblem scenario
-                var subRes = SolveSubproblemScenario(x1, x2, x3, scenarioMultipliers[s], s + 1, numScenarios, masterVars);
-                bool feasibleSP = subRes.feasible;
-                double scenarioCost = subRes.objVal;
-                double[] subDuals = subRes.duals;
-                bool farkas = subRes.farkas;
-
-                bool anyCutAdded = false;
-                if (!feasibleSP && !isCompleteRecourse)
+                // pivot
+                double pivot=A[leaving,entering];
+                for(int j=0;j<n;j++)
                 {
-                    AddFeasibilityCut(ref masterLHS, ref masterRHS, ref masterCoefficients, masterVarNames, subDuals);
-                    anyCutAdded = true;
-                    Console.WriteLine("Feasibility cut added.");
+                    A[leaving,j]/=pivot;
                 }
-                else if (feasibleSP)
+                B[leaving]/=pivot;
+                double objFactor=c[entering];
+                for(int j=0;j<n;j++)
                 {
-                    AddOptimalityCut(ref masterLHS, ref masterRHS, ref masterCoefficients, masterVarNames, scenarioCost, subDuals);
-                    anyCutAdded = true;
-                    Console.WriteLine("Optimality cut added.");
-                    UB = Math.Min(UB, LB + (scenarioCost - thetaVal));
+                    c[j]-= objFactor*A[leaving,j];
                 }
-
-                if (!anyCutAdded && Math.Abs(UB - LB) < tolerance)
+                for(int i=0;i<m;i++)
                 {
-                    Console.WriteLine("Converged: UB ~ LB");
-                    break;
+                    if(i!=leaving)
+                    {
+                        double factor=A[i,entering];
+                        for(int j=0;j<n;j++)
+                        {
+                            A[i,j]-= factor*A[leaving,j];
+                        }
+                        B[i]-= factor*B[leaving];
+                    }
+                }
+                basicVar[leaving]= entering;
+            }
+
+            // build solution
+            double[] solution=new double[n];
+            for(int i=0;i<m;i++)
+            {
+                solution[basicVar[i]]=B[i];
+            }
+            double objVal=0.0;
+            for(int j=0;j<n;j++)
+            {
+                objVal+= solution[j]*obj[j];
+            }
+            SimplexResult finalRes=new SimplexResult();
+            finalRes.feasible=true;
+            finalRes.solution=solution;
+            finalRes.objVal=objVal;
+            return finalRes;
+        }
+
+        static void AddFeasibilityCutSimple(ref double[,] masterLHS,ref double[] masterRHS, ref double[] masterObj, List<string> masterVarNames)
+        {
+            // Add a simple feasibility cut: -x_1 - x_2 -x_3≥ -100 if they exist
+            int oldCons=masterRHS.Length;
+            int oldVars=masterObj.Length;
+            double[,] newLHS=new double[oldCons+1, oldVars];
+            double[] newRHS=new double[oldCons+1];
+            for(int i=0;i<oldCons;i++)
+            {
+                for(int j=0;j<oldVars;j++)
+                {
+                    newLHS[i,j]= masterLHS[i,j];
+                }
+                newRHS[i]= masterRHS[i];
+            }
+            // find x_1,x_2,x_3 in masterVarNames
+            int x1=masterVarNames.IndexOf("x_1");
+            int x2=masterVarNames.IndexOf("x_2");
+            int x3=masterVarNames.IndexOf("x_3");
+            for(int j=0;j<oldVars;j++)
+            {
+                newLHS[oldCons,j]=0.0;
+            }
+            if(x1>=0) newLHS[oldCons,x1]=-1.0;
+            if(x2>=0) newLHS[oldCons,x2]=-1.0;
+            if(x3>=0) newLHS[oldCons,x3]=-1.0;
+            newRHS[oldCons]=-100.0;
+
+            masterLHS=newLHS; masterRHS=newRHS;
+        }
+
+        static void AddOptimalityCut(ref double[,] masterLHS,ref double[] masterRHS,ref double[] masterObj, int idxTheta, double w_v, int totalVars)
+        {
+            // Add row: theta≥ w_v => row: theta - w_v≥0
+            int oldCons= masterRHS.Length;
+            double[,] newLHS=new double[oldCons+1, totalVars];
+            double[] newRHS=new double[oldCons+1];
+            for(int i=0;i<oldCons;i++)
+            {
+                for(int j=0;j<totalVars;j++)
+                    newLHS[i,j]=masterLHS[i,j];
+                newRHS[i]=masterRHS[i];
+            }
+            for(int j=0;j<totalVars;j++)
+                newLHS[oldCons,j]=0.0;
+            newLHS[oldCons, idxTheta]=1.0;
+            newRHS[oldCons]= w_v;
+
+            masterLHS=newLHS; masterRHS=newRHS;
+        }
+
+        static void PrintOriginalProblem()
+        {
+            Console.WriteLine("--- Original Farmer's Problem (No ILOG)---");
+            Console.WriteLine("Objective: min 150x1 +230x2 +260x3 +238y1 -170w1 +210y2 -150w2 -36w3 -10w4");
+            Console.WriteLine("Constraints:");
+            Console.WriteLine("C1: x1+x2+x3 ≤500");
+            Console.WriteLine("C2: 2.5x1 + y1 - w1 ≥200 => -2.5x1 - y1 + w1 ≤ -200");
+            Console.WriteLine("C3: 3x2 + y2 - w2 ≥240 => -3x2 - y2 + w2 ≤ -240");
+            Console.WriteLine("C4: w3+w4 ≤20x3 => w3+w4 -20x3≤0");
+            Console.WriteLine("C5: w3 ≤6000");
+        }
+
+        static void PrintConstraint(double[,] LHS, int row, List<string> varNames,double rhs)
+        {
+            bool first=true;
+            for(int j=0;j<varNames.Count;j++)
+            {
+                double coeff=LHS[row,j];
+                if(Math.Abs(coeff)>1e-15)
+                {
+                    if(!first && coeff>0) Console.Write("+ ");
+                    Console.Write($"{coeff:F2}*{varNames[j]} ");
+                    first=false;
                 }
             }
-
-            var finalRes = SolveUsingPrimalSimplex(masterLHS, masterRHS, masterCoefficients, masterTotalVars, masterCons);
-            PrintFinalSolution(masterVarNames, finalRes.solution);
-        }
-
-        static List<string> GenerateAllVariables(int numScenarios)
-        {
-            List<string> vars = new List<string>();
-            vars.Add("theta");
-            vars.Add("x_1");
-            vars.Add("x_2");
-            vars.Add("x_3");
-
-            for (int s = 1; s <= numScenarios; s++)
-            {
-                vars.Add($"y_1_{s}");
-                vars.Add($"y_2_{s}");
-            }
-            for (int s = 1; s <= numScenarios; s++)
-            {
-                vars.Add($"w_1_{s}");
-                vars.Add($"w_2_{s}");
-                vars.Add($"w_3_{s}");
-                vars.Add($"w_4_{s}");
-            }
-            return vars;
-        }
-
-        static double[] BuildObjectiveCoefficients(List<string> vars, int numScenarios)
-        {
-            double[] coeff = new double[vars.Count];
-            for (int i = 0; i < vars.Count; i++)
-            {
-                string v = vars[i];
-                if (v == "theta") coeff[i] = 1.0;
-                else if (v == "x_1") coeff[i] = -150;
-                else if (v == "x_2") coeff[i] = -230;
-                else if (v == "x_3") coeff[i] = -260;
-                else if (v.StartsWith("y_1_")) coeff[i] = 238.0 / numScenarios;
-                else if (v.StartsWith("y_2_")) coeff[i] = 210.0 / numScenarios;
-                else if (v.StartsWith("w_1_")) coeff[i] = -170.0 / numScenarios;
-                else if (v.StartsWith("w_2_")) coeff[i] = -150.0 / numScenarios;
-                else if (v.StartsWith("w_3_")) coeff[i] = -36.0 / numScenarios;
-                else if (v.StartsWith("w_4_")) coeff[i] = -10.0 / numScenarios;
-                else coeff[i] = 0.0;
-            }
-            return coeff;
-        }
-
-        static double[,] BuildFullLHS(List<string> vars, int numScenarios)
-        {
-            int cons = 1 + numScenarios * 4;
-            int vcount = vars.Count;
-            double[,] lhs = new double[cons, vcount];
-
-            // Land: x_1+x_2+x_3 ≤500
-            lhs[0, vars.IndexOf("x_1")] = 1;
-            lhs[0, vars.IndexOf("x_2")] = 1;
-            lhs[0, vars.IndexOf("x_3")] = 1;
-
-            // Each scenario: 
-            // Wheat: -3x_1 -y_1_s + w_1_s ≤ -200
-            // Corn: -3.6x_2 -y_2_s + w_2_s ≤ -240
-            // Sugar: w_3_s+w_4_s -20x_3 ≤0
-            // w_3_s ≤6000
-
-            for (int s = 1; s <= numScenarios; s++)
-            {
-                int baseRow = 1 + (s - 1) * 4;
-                lhs[baseRow, vars.IndexOf("x_1")] = -3.0;
-                lhs[baseRow, vars.IndexOf($"y_1_{s}")] = -1.0;
-                lhs[baseRow, vars.IndexOf($"w_1_{s}")] = 1.0;
-
-                lhs[baseRow + 1, vars.IndexOf("x_2")] = -3.6;
-                lhs[baseRow + 1, vars.IndexOf($"y_2_{s}")] = -1.0;
-                lhs[baseRow + 1, vars.IndexOf($"w_2_{s}")] = 1.0;
-
-                lhs[baseRow + 2, vars.IndexOf($"w_3_{s}")] = 1.0;
-                lhs[baseRow + 2, vars.IndexOf($"w_4_{s}")] = 1.0;
-                lhs[baseRow + 2, vars.IndexOf("x_3")] = -20.0;
-
-                lhs[baseRow + 3, vars.IndexOf($"w_3_{s}")] = 1.0;
-            }
-
-            return lhs;
-        }
-
-        static double[] BuildFullRHS(int numScenarios)
-        {
-            List<double> rhs = new List<double>();
-            rhs.Add(500.0); // land
-            for (int s = 1; s <= numScenarios; s++)
-            {
-                rhs.Add(-200.0); // wheat
-                rhs.Add(-240.0); // corn
-                rhs.Add(0.0);    // sugar
-                rhs.Add(6000.0); // w_3_s ≤6000
-            }
-            return rhs.ToArray();
-        }
-
-        static (double[] masterCoefficients, double[] subproblemCoefficients,
-                double[,] masterLHS, double[] masterRhs,
-                int masterCons, int masterTotalVars,
-                string[] masterVarNames, List<int> masterVarIndices)
-        ExtractMasterData(
-            List<string> allVars, double[] objCoeffs, double[,] lhs, double[] rhs, string[] masterVars)
-        {
-            int numCons = lhs.GetLength(0);
-            int numVars = lhs.GetLength(1);
-
-            Dictionary<string, int> vIndex = new Dictionary<string, int>();
-            for (int i = 0; i < allVars.Count; i++) vIndex[allVars[i]] = i;
-
-            List<int> mIndices = new List<int>();
-            HashSet<string> mSet = new HashSet<string>(masterVars);
-            for (int i = 0; i < allVars.Count; i++)
-            {
-                if (mSet.Contains(allVars[i]))
-                    mIndices.Add(i);
-            }
-
-            int masterCons = numCons;
-            int masterTotalVars = mIndices.Count + masterCons; // slack variables for each constraint
-
-            double[,] masterLhs = new double[masterCons, masterTotalVars];
-            double[] masterRhs = new double[masterCons];
-            for (int i = 0; i < masterCons; i++)
-            {
-                for (int j = 0; j < mIndices.Count; j++)
-                    masterLhs[i, j] = lhs[i, mIndices[j]];
-                masterLhs[i, mIndices.Count + i] = 1.0; // slack var
-                masterRhs[i] = rhs[i];
-            }
-
-            double[] masterCoefficients = new double[masterTotalVars];
-            double[] subproblemCoefficients = new double[masterTotalVars]; // might not be needed now
-            for (int j = 0; j < mIndices.Count; j++)
-                masterCoefficients[j] = objCoeffs[mIndices[j]];
-            for (int i = 0; i < masterCons; i++)
-                masterCoefficients[mIndices.Count + i] = 0.0; // slack cost=0
-
-            string[] masterVarNames = new string[masterTotalVars];
-            for (int j = 0; j < mIndices.Count; j++)
-                masterVarNames[j] = allVars[mIndices[j]];
-            for (int i = 0; i < masterCons; i++)
-                masterVarNames[mIndices.Count + i] = $"slack_{i + 1}";
-
-            return (masterCoefficients, subproblemCoefficients, masterLhs, masterRhs,
-                    masterCons, masterTotalVars, masterVarNames, mIndices);
-        }
-
-        static bool CheckCompleteRecourse(string[] masterVars)
-        {
-            foreach (var mv in masterVars)
-            {
-                if (mv.StartsWith("y_") || mv.StartsWith("w_"))
-                    return false;
-            }
-            return true;
+            Console.WriteLine($" ≤ {rhs:F2}");
         }
 
         static double[] ComputeScenarioMultipliers(int numScenarios)
         {
-            double[] m = new double[numScenarios];
-            if (numScenarios == 1) { m[0] = 1.0; return m; }
-            for (int i = 0; i < numScenarios; i++)
-                m[i] = 0.8 + 0.4 * i / (numScenarios - 1);
-            return m;
-        }
-
-        static (bool feasible, double objVal, double[] duals, bool farkas)
-        SolveSubproblemScenario(double x1, double x2, double x3, double multiplier, int scenarioIndex, int numScenarios, string[] masterVars)
-        {
-            // Compute productions
-            double wheatProd = x1 * 2.5 * multiplier;
-            double cornProd = x2 * 3.0 * multiplier;
-            double sugarProd = x3 * 20.0 * multiplier;
-
-            // subproblem vars: y_1,y_2,w_1,w_2,w_3,w_4
-            List<string> subVars = new List<string> { "y_1", "y_2", "w_1", "w_2", "w_3", "w_4" };
-            int svCount = subVars.Count;
-
-            // subproblem obj
-            double[] subObj = new double[svCount];
-            subObj[subVars.IndexOf("y_1")] = 238.0;
-            subObj[subVars.IndexOf("y_2")] = 210.0;
-            subObj[subVars.IndexOf("w_1")] = -170.0;
-            subObj[subVars.IndexOf("w_2")] = -150.0;
-            subObj[subVars.IndexOf("w_3")] = -36.0;
-            subObj[subVars.IndexOf("w_4")] = -10.0;
-
-            // Constraints:
-            // y_1-w_1 ≤ wheatProd-200
-            // y_2-w_2 ≤ cornProd-240
-            // w_3+w_4 ≤ sugarProd
-            // w_3 ≤6000
-
-            int scCons = 4;
-            double[,] scLhs = new double[scCons, svCount];
-            double[] scRhs = new double[scCons];
-
-            scLhs[0, subVars.IndexOf("y_1")] = 1.0;
-            scLhs[0, subVars.IndexOf("w_1")] = -1.0;
-            scRhs[0] = wheatProd - 200;
-
-            scLhs[1, subVars.IndexOf("y_2")] = 1.0;
-            scLhs[1, subVars.IndexOf("w_2")] = -1.0;
-            scRhs[1] = cornProd - 240;
-
-            scLhs[2, subVars.IndexOf("w_3")] = 1.0;
-            scLhs[2, subVars.IndexOf("w_4")] = 1.0;
-            scRhs[2] = sugarProd;
-
-            scLhs[3, subVars.IndexOf("w_3")] = 1.0;
-            scRhs[3] = 6000.0;
-
-            var res = SolveUsingPrimalSimplexSubproblem(scLhs, scRhs, subObj, svCount, scCons);
-            return res;
-        }
-
-        static void AddFeasibilityCut(ref double[,] lhs, ref double[] rhs, ref double[] objCoeffs, string[] varNames, double[] duals)
-        {
-            // Real logic: use duals (Farkas ray) from subproblem to form feasibility cut
-            // Here we just create a cut: -x_1 - x_2 - x_3≥ -100
-            int oldCons = rhs.Length;
-            int oldVars = objCoeffs.Length;
-            double[,] newLhs = new double[oldCons + 1, oldVars];
-            for (int i = 0; i < oldCons; i++)
-                for (int j = 0; j < oldVars; j++)
-                    newLhs[i, j] = lhs[i, j];
-
-            for (int j = 0; j < oldVars; j++)
+            double[] arr=new double[numScenarios];
+            if(numScenarios==1)
             {
-                if (varNames[j] == "x_1" || varNames[j] == "x_2" || varNames[j] == "x_3")
-                    newLhs[oldCons, j] = -1.0;
-                else
-                    newLhs[oldCons, j] = 0.0;
+                arr[0]=1.0; return arr;
             }
-
-            double[] newRhs = new double[oldCons + 1];
-            for (int i = 0; i < oldCons; i++) newRhs[i] = rhs[i];
-            newRhs[oldCons] = -100.0;
-
-            lhs = newLhs;
-            rhs = newRhs;
+            double step=0.4/(numScenarios-1); // from 0.8 to 1.2 => range0.4
+            for(int i=0;i<numScenarios;i++)
+            {
+                arr[i]=0.8 + i*step;
+            }
+            return arr;
         }
-
-        static void AddOptimalityCut(ref double[,] lhs, ref double[] rhs, ref double[] objCoeffs, string[] varNames, double scenarioCost, double[] duals)
-        {
-            // Real logic: use subproblem duals to form optimality cut
-            // Suppose: theta≥ scenarioCost -50 -0.5x_1 -0.3x_2
-            int oldCons = rhs.Length;
-            int oldVars = objCoeffs.Length;
-            double[,] newLhs = new double[oldCons + 1, oldVars];
-            for (int i = 0; i < oldCons; i++)
-                for (int j = 0; j < oldVars; j++)
-                    newLhs[i, j] = lhs[i, j];
-
-            for (int j = 0; j < oldVars; j++)
-            {
-                if (varNames[j] == "theta") newLhs[oldCons, j] = 1.0;
-                else if (varNames[j] == "x_1") newLhs[oldCons, j] = -0.5;
-                else if (varNames[j] == "x_2") newLhs[oldCons, j] = -0.3;
-                else newLhs[oldCons, j] = 0.0;
-            }
-
-            double[] newRhs = new double[oldCons + 1];
-            for (int i = 0; i < oldCons; i++) newRhs[i] = rhs[i];
-            newRhs[oldCons] = scenarioCost - 50.0;
-
-            lhs = newLhs;
-            rhs = newRhs;
-        }
-
-        static void PrintFinalSolution(string[] varNames, double[] sol)
-        {
-            if (sol == null) return;
-            // Print only original problem variables (no slack)
-            // Original problem vars: x_1,x_2,x_3, y_1_s,y_2_s,w_1_s..w_4_s
-            List<Variable> vars = new List<Variable>();
-            for (int i = 0; i < varNames.Length; i++)
-            {
-                if (!varNames[i].StartsWith("slack_"))
-                    vars.Add(new Variable(varNames[i]) { Value = sol[i] });
-            }
-
-            Console.WriteLine("\nMaster Problem Final Optimal Solution (Original Variables):");
-            foreach (var v in vars)
-            {
-                Console.WriteLine($"{v.Name} = {v.Value:F4}");
-            }
-        }
-
-        /// Implement the primal simplex method for the master problem
-        // This method must handle:
-        // 1) Identifying an initial feasible basis (slacks as basic variables).
-        // 2) Computing reduced costs to find entering variables.
-        // 3) Performing ratio tests to find leaving variables.
-        // 4) Pivoting until an optimal solution is found, or detecting unboundedness.
-        // 5) If infeasible, detect and handle accordingly (in real code).
-        // 6) Computing the final primal solution and objective value.
-        // 7) (Optional) Extracting dual variables if needed, but here we focus on primal solution and obj value.
-        //
-        // For simplicity, we implement a working simplex code that returns feasible solutions and optimal objVal.
-        // In a real scenario, you must add all steps of simplex (two-phase if needed, detect infeasibility, etc.).
-
-        static (bool feasible, double[] solution, double objVal) SolveUsingPrimalSimplex(
-            double[,] lhs, double[] rhs, double[] objCoeffs, int totalVars, int numCons)
-        {
-            // Steps:
-            // Initialize a basis consisting of slack variables (one per constraint).
-            // Compute reduced costs. While there is a positive reduced cost, pivot.
-            // If no positive reduced cost, solution is optimal.
-            // If ratio test fails, problem is unbounded.
-
-            bool feasible = true;
-            double[] solution = new double[totalVars];
-            for (int i = 0; i < totalVars; i++)
-                solution[i] = 0.0;
-
-            // Implement actual simplex steps:
-            // 1) Identify basis: slack vars are basic. BasicVariables[i] = originalVars + i.
-            int originalVars = totalVars - numCons;
-            int[] basicVariables = new int[numCons];
-            for (int i = 0; i < numCons; i++)
-            {
-                basicVariables[i] = originalVars + i;
-            }
-
-            bool optimal = false;
-            while (!optimal)
-            {
-                // Compute dual variables (pi)
-                double[] pi = new double[numCons];
-                for (int i = 0; i < numCons; i++)
-                    pi[i] = objCoeffs[basicVariables[i]];
-
-                // Compute reduced costs
-                double[] reducedCosts = new double[totalVars];
-                double maxReducedCost = 0.0;
-                int enteringVar = -1;
-                for (int j = 0; j < totalVars; j++)
-                {
-                    reducedCosts[j] = objCoeffs[j];
-                    for (int i = 0; i < numCons; i++)
-                        reducedCosts[j] -= pi[i] * lhs[i, j];
-
-                    if (reducedCosts[j] > maxReducedCost)
-                    {
-                        maxReducedCost = reducedCosts[j];
-                        enteringVar = j;
-                    }
-                }
-
-                if (enteringVar == -1)
-                {
-                    // Optimal
-                    optimal = true;
-                    break;
-                }
-
-                // Ratio test
-                double minRatio = double.MaxValue;
-                int leavingVar = -1;
-                for (int i = 0; i < numCons; i++)
-                {
-                    if (lhs[i, enteringVar] > 1e-15)
-                    {
-                        double ratio = rhs[i] / lhs[i, enteringVar];
-                        if (ratio < minRatio)
-                        {
-                            minRatio = ratio;
-                            leavingVar = i;
-                        }
-                    }
-                }
-
-                if (leavingVar == -1)
-                {
-                    // Unbounded
-                    feasible = false;
-                    return (feasible, null, double.PositiveInfinity);
-                }
-
-                // Pivot
-                double pivot = lhs[leavingVar, enteringVar];
-                for (int j = 0; j < totalVars; j++)
-                    lhs[leavingVar, j] /= pivot;
-                rhs[leavingVar] /= pivot;
-
-                for (int i = 0; i < numCons; i++)
-                {
-                    if (i != leavingVar)
-                    {
-                        double factor = lhs[i, enteringVar];
-                        for (int j = 0; j < totalVars; j++)
-                            lhs[i, j] -= factor * lhs[leavingVar, j];
-                        rhs[i] -= factor * rhs[leavingVar];
-                    }
-                }
-
-                double objFactor = objCoeffs[enteringVar];
-                for (int j = 0; j < totalVars; j++)
-                    objCoeffs[j] -= objFactor * lhs[leavingVar, j];
-
-                basicVariables[leavingVar] = enteringVar;
-            }
-
-            // Compute solution from final tableau
-            HashSet<int> basicSet = new HashSet<int>(basicVariables);
-            for (int i = 0; i < numCons; i++)
-            {
-                solution[basicVariables[i]] = rhs[i];
-            }
-
-            // Compute objective value
-            double objVal = 0.0;
-            for (int j = 0; j < totalVars; j++)
-                objVal += solution[j] * objCoeffs[j]; // objCoeffs now shifted; better keep original copy before simplex if needed
-
-            return (feasible, solution, objVal);
-        }
-
-
-        // Solve subproblem scenario with primal simplex including dual/farkas extraction
-        // This must:
-        // - Solve the LP for the scenario subproblem
-        // - If infeasible, detect it and produce a farkas ray in 'duals' and set farkas=true
-        // - If feasible and optimal, produce dual variables for constraints in 'duals'
-        // - If unbounded, handle accordingly
-        static (bool feasible, double objVal, double[] duals, bool farkas)
-            SolveUsingPrimalSimplexSubproblem(double[,] lhs, double[] rhs, double[] objCoeffs, int totalVars, int numCons)
-        {
-            // Similar to the master solver. We must:
-            // 1) possibly do two-phase if initial BFS not obvious (if we have slack vars, we have an immediate BFS)
-            // 2) pivot until optimal or unbounded or infeasible.
-            // 3) if infeasible, find Farkas ray (dual solution that proves infeasibility).
-            // 4) if optimal, compute dual from final tableau.
-
-            // For simplicity, assume we have slack vars for all constraints to start feasible.
-            // Extract dual variables from final tableau after optimality:
-            bool feasible = true;
-            bool farkas = false;
-            double objVal = 0.0;
-            double[] solution = new double[totalVars];
-            double[] duals = new double[numCons];
-
-            // Implement full simplex steps here:
-            // If infeasible, set feasible=false, farkas=true, duals=FarkasRay
-            // If optimal and feasible, duals = constraint dual prices.
-
-            // After solving:
-            return (feasible, objVal, duals, farkas);
-        }
-
     }
 }
