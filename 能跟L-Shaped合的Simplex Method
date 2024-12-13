@@ -18,11 +18,15 @@ int numConstraints = rhs.Length;
 
 SimplexSolver simplex = new SimplexSolver(lhs, rhs, objCoeffs, totalVars, numConstraints);
 simplex.Solve();
-
+var (optimalValue, primalSolution, shadowPrices) = simplexSolver.GetSolutionDetails();
 */
 
 
 using System;
+using System.Diagnostics;
+
+using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 
 class SimplexSolver
@@ -33,6 +37,10 @@ class SimplexSolver
     private double[,] lhs;
     private int totalVars;
     private int numConstraints;
+
+    private double optimalValue;
+    private double[] primalSolution;
+    private double[] shadowPrices;
 
     // Constructor to initialize the simplex solver
     public SimplexSolver(double[,] lhs, double[] rhs, double[] objCoeffs, int totalVars, int numConstraints)
@@ -58,10 +66,7 @@ class SimplexSolver
 
         switch (method)
         {
-            case "Optimal":
-                Console.WriteLine("The initial solution is optimal.");
-                break;
-
+         
             case "Primal":
                 SolveUsingPrimalSimplex();
                 break;
@@ -192,7 +197,7 @@ class SimplexSolver
                 break;
             }
 
-            Console.WriteLine($"Chosen entering variable: {(enteringVarIndex < originalVars ? "x" : "s")}{enteringVarIndex + 1}");
+            Console.WriteLine($"Chosen entering variable: x{enteringVarIndex + 1}");
 
             // Perform ratio test to select leaving variable
             int leavingVarIndex = -1;
@@ -218,7 +223,7 @@ class SimplexSolver
                 break;
             }
 
-            Console.WriteLine($"Chosen leaving variable: {(basicVariables[leavingVarIndex] < originalVars ? "x" : "s")}{basicVariables[leavingVarIndex] + 1}");
+            Console.WriteLine($"Chosen leaving variable: x{basicVariables[leavingVarIndex] + 1}");
 
             // Perform pivot operation
             double pivotElement = lhs[leavingVarIndex, enteringVarIndex];
@@ -255,35 +260,9 @@ class SimplexSolver
             basicVariables[leavingVarIndex] = enteringVarIndex;
         }
 
-        // Output the final solution
-        OutputFinalSolution(basicVariables);
-
+        StoreSolution(basicVariables);
         stopwatch.Stop();
         Console.WriteLine($"Total runtime for Primal method: {stopwatch.Elapsed.TotalSeconds} seconds");
-    }
-
-    private void OutputFinalSolution(int[] basicVariables)
-    {
-        int originalVars = totalVars - numConstraints;
-        Console.WriteLine("\nFinal Solution:");
-        double optimalValue = 0;
-
-        for (int i = 0; i < numConstraints; i++)
-        {
-            int varIndex = basicVariables[i];
-            double value = rhs[i];
-            if (varIndex < originalVars)
-            {
-                Console.WriteLine($"x{varIndex + 1} = {value:F2}");
-            }
-            else
-            {
-                Console.WriteLine($"s{varIndex - originalVars + 1} = {value:F2}");
-            }
-            optimalValue += objCoeffs[varIndex] * value;
-        }
-
-        Console.WriteLine($"\nOptimal Value: {optimalValue:F2}");
     }
 
     private void SolveUsingDualSimplex()
@@ -393,10 +372,35 @@ class SimplexSolver
             basicVariables[leavingVarIndex] = enteringVarIndex;
         }
 
+        StoreSolution(basicVariables);
         Console.WriteLine("Dual Simplex Method completed.");
     }
 
+    private void StoreSolution(int[] basicVariables)
+    {
+        optimalValue = 0;
+        primalSolution = new double[totalVars];
+        shadowPrices = new double[numConstraints];
+
+        for (int i = 0; i < numConstraints; i++)
+        {
+            int varIndex = basicVariables[i];
+            primalSolution[varIndex] = rhs[i];
+            if (varIndex >= totalVars - numConstraints) // Slack variables
+            {
+                shadowPrices[i] = objCoeffs[varIndex];
+            }
+        }
+
+        for (int i = 0; i < totalVars; i++)
+        {
+            optimalValue += objCoeffs[i] * primalSolution[i];
+        }
+    }
+
+    public (double OptimalValue, double[] PrimalSolution, double[] ShadowPrices) GetSolutionDetails()
+    {
+        return (optimalValue, primalSolution, shadowPrices);
+    }
 }
-
-
 
