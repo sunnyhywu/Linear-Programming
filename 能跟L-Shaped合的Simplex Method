@@ -7,8 +7,6 @@ RHS Vector: The right-hand side values.
 Objective Coefficients: The coefficients of the objective function.
 In your L-Shaped method, you can create and initialize an instance of this class as follows:
 
-csharp
-複製程式碼
 // Inside your L-Shaped method:
 double[,] lhs = GenerateLHS(); // Replace with your matrix generator logic
 double[] rhs = GenerateRHS(); // Replace with your RHS generator logic
