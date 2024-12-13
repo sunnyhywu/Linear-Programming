@@ -81,7 +81,7 @@ namespace StochasticFarmerProblem
 
             // 5. Extract Master and Subproblem data
             var (masterCoefficients, subproblemCoefficients, masterLhs, masterRhs,
-                subproblemLhs, subproblemRhs, masterConstraints, masterTotalVars, masterVarNames, subVarNames, W) =
+                subproblemLhs, subproblemRhs, masterConstraints, masterTotalVars, masterVarNames, subVarNames) =
                     ExtractMasterAndSubproblemData(
                         allVariables,
                         objectiveCoefficients,
@@ -93,7 +93,7 @@ namespace StochasticFarmerProblem
             //6.L-shaped method並且根據每一次迭代跑一個h_k,q_k,T_k(所以會在scenario的迴圈中每次跑)
             for (int s = 0; s < numScenarios; s++)
             {
-                var (H, Q, T) = ExtractHAndQAndT(
+                var (H, Q, T, W) = ExtractHAndQAndT(
                                 subproblemCoefficients,
                                 subproblemLhs,
                                 subproblemRhs,
@@ -105,7 +105,7 @@ namespace StochasticFarmerProblem
             }
 
             //====================Some functions================================
-            (List<double>, List<double>, List<List<double>>) ExtractHAndQAndT(
+            (List<double>, List<double>, List<List<double>>, List<List<double>>) ExtractHAndQAndT(
         double[] subproblemCoefficients,
         double[,] subproblemLhs,
         double[] subproblemRhs,
@@ -117,7 +117,10 @@ namespace StochasticFarmerProblem
             {
                 List<double> H = new List<double>();
                 List<double> Q = new List<double>();
-
+                // 構建 W
+                int nrowW = subproblemRhs.Length / numScenarios; ;
+                int ncolW = subVarNames.Count / numScenarios; // Subproblem 變數的數量
+                List<List<double>> W = new List<List<double>>();
                 // Extract H for the current scenario
                 for (int i = 0; i < subproblemRhs.Length / numScenarios; i++)
                 {
@@ -126,7 +129,6 @@ namespace StochasticFarmerProblem
 
                 // Extract Q for the target variables
                 List<string> firstTargetVariables = new List<string>();
-
                 foreach (string varName in subVarNames)
                 {
                     // Dynamically generate the variable names for the current scenario
@@ -147,13 +149,43 @@ namespace StochasticFarmerProblem
                     }
 
                 }
- 
+
                 foreach (string varName in firstTargetVariables)
                 {
                     int varIndex = allVariables.IndexOf(varName);
-                     Q.Add(subproblemCoefficients[varIndex]);
+                    Q.Add(subproblemCoefficients[varIndex]);
 
                 }
+                // 初始化 T 的每一行
+                for (int i = 0; i < nrowW; i++)
+                {
+                    W.Add(new List<double>());
+                    for (int j = 0; j < ncolW; j++)
+                    {
+                        W[i].Add(0);  // 為每個元素添加預設值
+                    }
+                }
+                // 填充 W 矩陣
+                for (int i = 0; i < nrowW; i++)
+                {
+                    // 遍歷 firstTargetVariables 中的每一個目標變數
+                    for (int j = 0; j < firstTargetVariables.Count; j++)
+                    {
+                        // 獲取目標變數 varName 的索引
+                        string varName = firstTargetVariables[j];
+
+                        // 確保 allVariables 中包含該變數
+                        int varIndex = allVariables.IndexOf(varName);
+
+                        // 確保索引有效
+                        if (varIndex >= 0)
+                        {
+                            // 填充 W 矩陣，對應的位置從 subproblemLhs 中取值
+                            W[i][j] = subproblemLhs[nrowW * s + i, varIndex];
+                        }
+                    }
+                }
+
 
                 // T: 用雙維 List 代替二維陣列
                 int nrowT = subproblemRhs.Length / numScenarios;//4
@@ -207,12 +239,22 @@ namespace StochasticFarmerProblem
                     Console.WriteLine();
                 }
 
-                return (H, Q, T);
+                Console.WriteLine($"Scenario {s + 1} W matrix:");
+                for (int i = 0; i < nrowW; i++)
+                {
+                    for (int j = 0; j < ncolW; j++)
+                    {
+                        Console.Write($"{W[i][j]} ");
+                    }
+                    Console.WriteLine();
+                }
+
+                return (H, Q, T,W);
             }
             static (double[] masterCoefficients, double[] subproblemCoefficient,
             double[,] masterLhs, double[] masterRhs,
             double[,] subproblemLhs, double[] subproblemRhs,
-            int masterConstraints, int masterTotalVars, List<string> masterVarNames, List<string> subVarNames, double[,] W)
+            int masterConstraints, int masterTotalVars, List<string> masterVarNames, List<string> subVarNames)
             ExtractMasterAndSubproblemData(
             List<string> allVariables, double[] objectiveCoefficients,
             double[,] lhsMatrix, double[] rhsMatrix, string[] masterVariables, int numScenarios)
@@ -301,45 +343,6 @@ namespace StochasticFarmerProblem
                         subproblemRhs[i] = rhsMatrix[rowIndex];
                     }
 
-                    // 構建 W
-                    int nrowW = subproblemConstraints / numScenarios;
-                    int ncolW = subVarNames.Count / numScenarios; // Subproblem 變數的數量
-                    double[,] W = new double[nrowW, ncolW];
-                    // 初始化 firstTargetVariables 為 List 以便存放符合條件的變數
-                    List<string> firstTargetVariables = new List<string>();
-                    // 目標變數
-                    string[] targetVariables = { "x_1", "y_1_1", "y_2_1", "w_1_1", "w_2_1", "w_3_1", "w_4_1" };
-
-                    // 遍歷 subVarNames，並檢查是否包含在 targetVariables 中
-                    foreach (string varName in subVarNames)
-                    {
-                        if (targetVariables.Contains(varName))
-                        {
-                            firstTargetVariables.Add(varName);
-                        }
-                    }
-
-                    // 填充 W 矩陣
-                    for (int i = 0; i < nrowW; i++)
-                    {
-                        // 遍歷 firstTargetVariables 中的每一個目標變數
-                        for (int j = 0; j < firstTargetVariables.Count; j++)
-                        {
-                            // 獲取目標變數 varName 的索引
-                            string varName = firstTargetVariables[j];
-
-                            // 確保 allVariables 中包含該變數
-                            int varIndex = allVariables.IndexOf(varName);
-
-                            // 確保索引有效
-                            if (varIndex >= 0)
-                            {
-                                // 填充 W 矩陣，對應的位置從 subproblemLhs 中取值
-                                W[i, j] = subproblemLhs[i, varIndex];
-                            }
-                        }
-                    }
-                
                 var masterCoefficients = new double[objectiveCoefficients.Length + masterConstraints];
                 var subproblemCoefficients = new double[objectiveCoefficients.Length + masterConstraints];
                 var masterSet = new HashSet<string>(masterVariables.Select(s => s.Trim()));
@@ -375,7 +378,7 @@ namespace StochasticFarmerProblem
 
                 return (masterCoefficients, subproblemCoefficients,
                     masterLhs, masterRhs, subproblemLhs, subproblemRhs,
-                    masterConstraints, masterTotalVars, masterVarNames, subVarNames, W);
+                    masterConstraints, masterTotalVars, masterVarNames, subVarNames);
 
             }
 
@@ -577,18 +580,6 @@ namespace StochasticFarmerProblem
             {
                 Console.WriteLine($"{rhs:F2}");
             }
-
-            Console.WriteLine("\n W:");
-            for (int i = 0; i < W.GetLength(0); i++)
-            {
-                for (int j = 0; j < W.GetLength(1); j++)
-                {
-                    Console.Write($"{W[i, j],8:F2} ");
-                }
-                Console.WriteLine();
-            }
-
-
 
             // Solve Using Primal Simplex Method
             static void SolveUsingPrimalSimplex(double[,] lhs, double[] rhs,
