@@ -1,582 +1,1027 @@
 using System;
+using System.IO;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
-namespace StochasticFarmerProblem
+class ResourceAllocationProblem
 {
-    // Class to store variable info
-    class Variable
+    static double[] objCoeffs;
+
+    // Solve Using Primal Simplex Method
+    static void SolveUsingPrimalSimplex(double[,] lhs, double[] rhs,
+                                    double[] objectiveCoefficients, int totalVars, int numConstraints)
     {
-        public string Name { get; set; }
-        public double Value { get; set; }
-        public bool IsSlack { get; set; } // To identify slack variables
-        public Variable(string name, bool isSlack = false) { Name = name; Value = 0.0; IsSlack = isSlack; }
+        Stopwatch stopwatch = new Stopwatch();
+        stopwatch.Start();
+
+        bool shouldContinue = true;
+        int iterationCount = 0;
+        int originalVars = totalVars - numConstraints;
+
+        // Store the original objective coefficients
+        double[] objCoeffs = new double[totalVars];
+        Array.Copy(objectiveCoefficients, objCoeffs, totalVars);
+
+        // Initialize basic variables (slack variables)
+        int[] basicVariables = new int[numConstraints];
+        for (int i = 0; i < numConstraints; i++)
+        {
+            basicVariables[i] = originalVars + i;
+        }
+
+        while (shouldContinue)
+        {
+            iterationCount++;
+            Console.WriteLine($"\n--- Iteration {iterationCount} ---");
+
+            // Calculate the dual variables (pi)
+            double[] pi = new double[numConstraints];
+            for (int i = 0; i < numConstraints; i++)
+            {
+                pi[i] = objectiveCoefficients[basicVariables[i]];
+            }
+
+            // Compute reduced costs for all variables
+            double[] reducedCosts = new double[totalVars];
+            for (int j = 0; j < totalVars; j++)
+            {
+                reducedCosts[j] = objectiveCoefficients[j];
+                for (int i = 0; i < numConstraints; i++)
+                {
+                    reducedCosts[j] -= pi[i] * lhs[i, j];
+                }
+            }
+
+            // Identify the entering variable (most positive reduced cost)
+            int enteringVarIndex = -1;
+            double maxReducedCost = 0;
+            for (int j = 0; j < totalVars; j++)
+            {
+                if (reducedCosts[j] > maxReducedCost)
+                {
+                    maxReducedCost = reducedCosts[j];
+                    enteringVarIndex = j;
+                }
+            }
+
+            // If no entering variable is found, the solution is optimal
+            if (enteringVarIndex == -1)
+            {
+                Console.WriteLine("Optimal solution found.");
+                shouldContinue = false;
+                break;
+            }
+
+            Console.WriteLine($"Chosen entering variable: {(enteringVarIndex < originalVars ? "x" : "s")}{enteringVarIndex + 1}");
+
+            // Perform ratio test to select leaving variable
+            int leavingVarIndex = -1;
+            double minRatio = double.MaxValue;
+            for (int i = 0; i < numConstraints; i++)
+            {
+                if (lhs[i, enteringVarIndex] > 0)
+                {
+                    double ratio = rhs[i] / lhs[i, enteringVarIndex];
+                    if (ratio < minRatio)
+                    {
+                        minRatio = ratio;
+                        leavingVarIndex = i;
+                    }
+                }
+            }
+
+            // If no leaving variable is found, the problem is unbounded
+            if (leavingVarIndex == -1)
+            {
+                Console.WriteLine("Problem is unbounded.");
+                shouldContinue = false;
+                break;
+            }
+
+            Console.WriteLine($"Chosen leaving variable: {(basicVariables[leavingVarIndex] < originalVars ? "x" : "s")}{basicVariables[leavingVarIndex] + 1}");
+
+            // Perform pivot operation
+            double pivotElement = lhs[leavingVarIndex, enteringVarIndex];
+
+            // Update the leaving row in-place
+            for (int j = 0; j < totalVars; j++)
+            {
+                lhs[leavingVarIndex, j] /= pivotElement;
+            }
+            rhs[leavingVarIndex] /= pivotElement;
+
+            // Update all other rows in-place
+            for (int i = 0; i < numConstraints; i++)
+            {
+                if (i != leavingVarIndex)
+                {
+                    double factor = lhs[i, enteringVarIndex];
+                    for (int j = 0; j < totalVars; j++)
+                    {
+                        lhs[i, j] -= factor * lhs[leavingVarIndex, j];
+                    }
+                    rhs[i] -= factor * rhs[leavingVarIndex];
+                }
+            }
+
+            // Update the objective coefficients in-place
+            double objectiveFactor = objectiveCoefficients[enteringVarIndex];
+            for (int j = 0; j < totalVars; j++)
+            {
+                objectiveCoefficients[j] -= objectiveFactor * lhs[leavingVarIndex, j];
+            }
+
+            // Update the basic variable index in-place
+            basicVariables[leavingVarIndex] = enteringVarIndex;
+
+            // Print the current tableau
+            //PrintCurrentDictionaryForPrimal(objectiveCoefficients, lhs, rhs, basicVariables, totalVars, numConstraints);
+        }
+
+        // Output the final solution with shadow prices and slack variables
+        OutputFinalSolutionWithShadowPricesAndSlacks(objCoeffs, lhs, rhs, basicVariables, totalVars, numConstraints);
+       
+
+        stopwatch.Stop();
+        Console.WriteLine($"Total runtime for Primal method: {stopwatch.Elapsed.TotalSeconds} seconds");
     }
 
-    class BendersDecomposition
+
+    // Shared output function to display the final solution, shadow prices, and slack variables
+    static void OutputFinalSolutionWithShadowPricesAndSlacks(double[] objCoeffs, double[,] lhs, double[] rhs, int[] basicVariables, int totalVars, int numConstraints)
     {
-        static void Main(string[] args)
+        int originalVars = totalVars - numConstraints;
+        Console.WriteLine("\nFinal Solution:");
+        double optimalValue = 0;
+        HashSet<int> basicSet = new HashSet<int>(basicVariables);
+
+        // Display values for basic variables
+        for (int i = 0; i < numConstraints; i++)
         {
-            Console.WriteLine("Enter the number of scenarios:");
-            int numScenarios;
-            while (!int.TryParse(Console.ReadLine(), out numScenarios) || numScenarios <= 0)
+            int varIndex = basicVariables[i];
+            double value = rhs[i];
+            if (varIndex < originalVars)
             {
-                Console.WriteLine("Invalid input. Enter positive integer for scenarios:");
+                Console.WriteLine($"x{varIndex + 1} = {value:F2}");
             }
+            else
+            {
+                Console.WriteLine($"s{varIndex - originalVars + 1} = {value:F2}");
+            }
+            optimalValue += objCoeffs[varIndex] * value; // Calculate optimal value
+        }
 
-            // Generate all variables (x_1,x_2,x_3 for first-stage, y_1_s,y_2_s,w_1_s,... for second-stage)
-            List<string> allVariables = GenerateAllVariables(numScenarios);
+        // Display values for non-basic slack variables (not in basic set)
+        for (int i = originalVars; i < totalVars; i++)
+        {
+            if (!basicSet.Contains(i))
+            {
+                Console.WriteLine($"s{i - originalVars + 1} = 0.00");
+            }
+        }
 
-            Console.WriteLine("\nAll Variables:");
-            foreach (var v in allVariables) Console.Write(v + " ");
+        Console.WriteLine($"\nOptimal Value: {optimalValue:F2}");
+
+        // Calculate and display shadow prices
+        Console.WriteLine("\nShadow Prices (Dual Variables):");
+        for (int i = 0; i < numConstraints; i++)
+        {
+            double shadowPrice = objCoeffs[basicVariables[i]];
+            Console.WriteLine($"Dual variable for constraint {i + 1}: {shadowPrice:F2}");
+        }
+
+        // Calculate and display slack variables correctly
+        Console.WriteLine("\nSlack Variables:");
+        for (int i = 0; i < numConstraints; i++)
+        {
+            double slack = rhs[i];
+            if (basicVariables[i] < originalVars)
+            {
+                // The slack is zero for basic variables corresponding to original variables
+                slack = 0;
+            }
+            Console.WriteLine($"Slack for constraint {i + 1}: {slack:F2}");
+        }
+    }
+
+    // Shared function to display the current tableau
+    static void PrintCurrentDictionaryForPrimal(double[] objectiveCoefficients, double[,] lhs, double[] rhs, int[] basicVariables, int totalVars, int numConstraints)
+    {
+        int originalVars = totalVars - numConstraints;
+
+        Console.WriteLine("\nCurrent Dictionary:");
+        Console.WriteLine("Objective Coefficients:");
+        for (int j = 0; j < totalVars; j++)
+        {
+            if (j < originalVars)
+                Console.Write($"x{j + 1}: {objectiveCoefficients[j]:F2} ");
+            else
+                Console.Write($"s{j - originalVars + 1}: {objectiveCoefficients[j]:F2} ");
+        }
+        Console.WriteLine();
+
+        Console.WriteLine("\nConstraints:");
+        for (int i = 0; i < numConstraints; i++)
+        {
+            Console.Write($"Basic Variable (Row {i + 1}): ");
+            if (basicVariables[i] < originalVars)
+                Console.Write($"x{basicVariables[i] + 1} = ");
+            else
+                Console.Write($"s{basicVariables[i] - originalVars + 1} = ");
+
+            Console.Write($"{rhs[i]:F2} ");
+
+            for (int j = 0; j < totalVars; j++)
+            {
+                if (lhs[i, j] != 0)
+                {
+                    if (j < originalVars)
+                        Console.Write($"+ ({lhs[i, j]:F2}) x{j + 1} ");
+                    else
+                        Console.Write($"+ ({lhs[i, j]:F2}) s{j - originalVars + 1} ");
+                }
+            }
             Console.WriteLine();
+        }
+        Console.WriteLine();
+    }
 
-            Console.WriteLine("\nEnter variables to include in the master problem (comma-separated):");
-            string inputVars = Console.ReadLine();
-            string[] masterVars = inputVars.Split(',').Select(s => s.Trim()).Where(s => s != "").ToArray();
 
-            // Build full objective and constraints
-            double[] fullObj = BuildObjectiveCoefficients(allVariables, numScenarios);
-            double[,] fullLHS = BuildFullLHS(allVariables, numScenarios);
-            double[] fullRHS = BuildFullRHS(numScenarios);
+    static void SolveUsingDualSimplex(double[,] lhs, double[] rhs, double[] objectiveCoefficients, int totalVars, int numConstraints)
+    {
+        Console.WriteLine("\n--- Starting Dual Simplex Method ---");
+        bool shouldContinue = true;
+        int iterationCount = 0;
+        int originalVars = totalVars - numConstraints;
 
-            // Extract master data
-            var masterData = ExtractMasterData(allVariables, fullObj, fullLHS, fullRHS, masterVars);
-            double[] masterCoefficients = masterData.masterCoefficients;
-            double[,] masterLHS = masterData.masterLHS;
-            double[] masterRHS = masterData.masterRhs;
-            int masterCons = masterData.masterCons;
-            int masterTotalVars = masterData.masterTotalVars;
-            string[] masterVarNames = masterData.masterVarNames;
-            List<int> masterVarIndices = masterData.masterVarIndices;
+        // Copy the original objective coefficients
+        double[] objCoeffs = new double[totalVars];
+        Array.Copy(objectiveCoefficients, objCoeffs, totalVars);
 
-            // Check complete recourse
-            bool isCompleteRecourse = CheckCompleteRecourse(masterVars);
+        // Initialize basic variables (slack variables should be basic initially)
+        int[] basicVariables = new int[numConstraints];
+        for (int i = 0; i < numConstraints; i++)
+        {
+            basicVariables[i] = originalVars + i; // Indices of slack variables
+        }
 
-            // Scenario multipliers
-            double[] scenarioMultipliers = ComputeScenarioMultipliers(numScenarios);
+        while (shouldContinue)
+        {
+            iterationCount++;
+            Console.WriteLine($"\n--- Iteration {iterationCount} ---");
 
-            double UB = double.PositiveInfinity;
-            double LB = double.NegativeInfinity;
-            double tolerance = 1e-6;
-            int maxIterations = 50;
-            int scenarioIndex = 0;
-
-            // L-shaped method iteration
-            for (int iteration = 1; iteration <= maxIterations; iteration++)
+            // Step 1: Identify the most negative RHS entry (leaving variable)
+            int leavingVarIndex = -1;
+            double mostNegativeRHS = 0;
+            for (int i = 0; i < numConstraints; i++)
             {
-                Console.WriteLine($"\n--- Benders Iteration {iteration} ---");
-
-                var masterRes = SolveUsingPrimalSimplex(masterLHS, masterRHS, masterCoefficients, masterTotalVars, masterCons);
-                if (!masterRes.feasible)
+                if (rhs[i] < mostNegativeRHS)
                 {
-                    Console.WriteLine("Master infeasible. Stopping.");
-                    break;
-                }
-
-                LB = masterRes.objVal;
-                double[] masterSol = masterRes.solution;
-
-                // Choose scenario
-                int s = scenarioIndex;
-                scenarioIndex = (scenarioIndex + 1) % numScenarios;
-
-                // Extract x_1,x_2,x_3,theta
-                double x1 = 0, x2 = 0, x3 = 0, thetaVal = 0;
-                Dictionary<string, double> masterSolutionMap = new Dictionary<string, double>();
-                for (int i = 0; i < masterVarNames.Length; i++)
-                {
-                    masterSolutionMap[masterVarNames[i]] = masterSol[i];
-                    if (masterVarNames[i] == "x_1") x1 = masterSol[i];
-                    else if (masterVarNames[i] == "x_2") x2 = masterSol[i];
-                    else if (masterVarNames[i] == "x_3") x3 = masterSol[i];
-                    else if (masterVarNames[i] == "theta") thetaVal = masterSol[i];
-                }
-
-                // Solve subproblem scenario
-                var subRes = SolveSubproblemScenario(x1, x2, x3, scenarioMultipliers[s], s + 1, numScenarios, masterVars);
-                bool feasibleSP = subRes.feasible;
-                double scenarioCost = subRes.objVal;
-                double[] subDuals = subRes.duals;
-                bool farkas = subRes.farkas;
-
-                bool anyCutAdded = false;
-                if (!feasibleSP && !isCompleteRecourse)
-                {
-                    AddFeasibilityCut(ref masterLHS, ref masterRHS, ref masterCoefficients, masterVarNames, subDuals);
-                    anyCutAdded = true;
-                    Console.WriteLine("Feasibility cut added.");
-                }
-                else if (feasibleSP)
-                {
-                    AddOptimalityCut(ref masterLHS, ref masterRHS, ref masterCoefficients, masterVarNames, scenarioCost, subDuals);
-                    anyCutAdded = true;
-                    Console.WriteLine("Optimality cut added.");
-                    UB = Math.Min(UB, LB + (scenarioCost - thetaVal));
-                }
-
-                if (!anyCutAdded && Math.Abs(UB - LB) < tolerance)
-                {
-                    Console.WriteLine("Converged: UB ~ LB");
-                    break;
+                    mostNegativeRHS = rhs[i];
+                    leavingVarIndex = i;
                 }
             }
 
-            var finalRes = SolveUsingPrimalSimplex(masterLHS, masterRHS, masterCoefficients, masterTotalVars, masterCons);
-            PrintFinalSolution(masterVarNames, finalRes.solution);
-        }
-
-        static List<string> GenerateAllVariables(int numScenarios)
-        {
-            List<string> vars = new List<string>();
-            vars.Add("theta");
-            vars.Add("x_1");
-            vars.Add("x_2");
-            vars.Add("x_3");
-
-            for (int s = 1; s <= numScenarios; s++)
+            // If no negative RHS, optimal solution is found
+            if (leavingVarIndex == -1)
             {
-                vars.Add($"y_1_{s}");
-                vars.Add($"y_2_{s}");
-            }
-            for (int s = 1; s <= numScenarios; s++)
-            {
-                vars.Add($"w_1_{s}");
-                vars.Add($"w_2_{s}");
-                vars.Add($"w_3_{s}");
-                vars.Add($"w_4_{s}");
-            }
-            return vars;
-        }
-
-        static double[] BuildObjectiveCoefficients(List<string> vars, int numScenarios)
-        {
-            double[] coeff = new double[vars.Count];
-            for (int i = 0; i < vars.Count; i++)
-            {
-                string v = vars[i];
-                if (v == "theta") coeff[i] = 1.0;
-                else if (v == "x_1") coeff[i] = -150;
-                else if (v == "x_2") coeff[i] = -230;
-                else if (v == "x_3") coeff[i] = -260;
-                else if (v.StartsWith("y_1_")) coeff[i] = 238.0 / numScenarios;
-                else if (v.StartsWith("y_2_")) coeff[i] = 210.0 / numScenarios;
-                else if (v.StartsWith("w_1_")) coeff[i] = -170.0 / numScenarios;
-                else if (v.StartsWith("w_2_")) coeff[i] = -150.0 / numScenarios;
-                else if (v.StartsWith("w_3_")) coeff[i] = -36.0 / numScenarios;
-                else if (v.StartsWith("w_4_")) coeff[i] = -10.0 / numScenarios;
-                else coeff[i] = 0.0;
-            }
-            return coeff;
-        }
-
-        static double[,] BuildFullLHS(List<string> vars, int numScenarios)
-        {
-            int cons = 1 + numScenarios * 4;
-            int vcount = vars.Count;
-            double[,] lhs = new double[cons, vcount];
-
-            // Land: x_1+x_2+x_3 ≤500
-            lhs[0, vars.IndexOf("x_1")] = 1;
-            lhs[0, vars.IndexOf("x_2")] = 1;
-            lhs[0, vars.IndexOf("x_3")] = 1;
-
-            // Each scenario: 
-            // Wheat: -3x_1 -y_1_s + w_1_s ≤ -200
-            // Corn: -3.6x_2 -y_2_s + w_2_s ≤ -240
-            // Sugar: w_3_s+w_4_s -20x_3 ≤0
-            // w_3_s ≤6000
-
-            for (int s = 1; s <= numScenarios; s++)
-            {
-                int baseRow = 1 + (s - 1) * 4;
-                lhs[baseRow, vars.IndexOf("x_1")] = -3.0;
-                lhs[baseRow, vars.IndexOf($"y_1_{s}")] = -1.0;
-                lhs[baseRow, vars.IndexOf($"w_1_{s}")] = 1.0;
-
-                lhs[baseRow + 1, vars.IndexOf("x_2")] = -3.6;
-                lhs[baseRow + 1, vars.IndexOf($"y_2_{s}")] = -1.0;
-                lhs[baseRow + 1, vars.IndexOf($"w_2_{s}")] = 1.0;
-
-                lhs[baseRow + 2, vars.IndexOf($"w_3_{s}")] = 1.0;
-                lhs[baseRow + 2, vars.IndexOf($"w_4_{s}")] = 1.0;
-                lhs[baseRow + 2, vars.IndexOf("x_3")] = -20.0;
-
-                lhs[baseRow + 3, vars.IndexOf($"w_3_{s}")] = 1.0;
+                Console.WriteLine("Optimal solution found.");
+                shouldContinue = false;
+                break;
             }
 
-            return lhs;
-        }
-
-        static double[] BuildFullRHS(int numScenarios)
-        {
-            List<double> rhs = new List<double>();
-            rhs.Add(500.0); // land
-            for (int s = 1; s <= numScenarios; s++)
+            // Step 2: Select entering variable by dual feasibility ratio test
+            int enteringVarIndex = -1;
+            double minRatio = double.MaxValue;
+            for (int j = 0; j < totalVars; j++)
             {
-                rhs.Add(-200.0); // wheat
-                rhs.Add(-240.0); // corn
-                rhs.Add(0.0);    // sugar
-                rhs.Add(6000.0); // w_3_s ≤6000
-            }
-            return rhs.ToArray();
-        }
-
-        static (double[] masterCoefficients, double[] subproblemCoefficients,
-                double[,] masterLHS, double[] masterRhs,
-                int masterCons, int masterTotalVars,
-                string[] masterVarNames, List<int> masterVarIndices)
-        ExtractMasterData(
-            List<string> allVars, double[] objCoeffs, double[,] lhs, double[] rhs, string[] masterVars)
-        {
-            int numCons = lhs.GetLength(0);
-            int numVars = lhs.GetLength(1);
-
-            Dictionary<string, int> vIndex = new Dictionary<string, int>();
-            for (int i = 0; i < allVars.Count; i++) vIndex[allVars[i]] = i;
-
-            List<int> mIndices = new List<int>();
-            HashSet<string> mSet = new HashSet<string>(masterVars);
-            for (int i = 0; i < allVars.Count; i++)
-            {
-                if (mSet.Contains(allVars[i]))
-                    mIndices.Add(i);
-            }
-
-            int masterCons = numCons;
-            int masterTotalVars = mIndices.Count + masterCons; // slack variables for each constraint
-
-            double[,] masterLhs = new double[masterCons, masterTotalVars];
-            double[] masterRhs = new double[masterCons];
-            for (int i = 0; i < masterCons; i++)
-            {
-                for (int j = 0; j < mIndices.Count; j++)
-                    masterLhs[i, j] = lhs[i, mIndices[j]];
-                masterLhs[i, mIndices.Count + i] = 1.0; // slack var
-                masterRhs[i] = rhs[i];
-            }
-
-            double[] masterCoefficients = new double[masterTotalVars];
-            double[] subproblemCoefficients = new double[masterTotalVars]; // might not be needed now
-            for (int j = 0; j < mIndices.Count; j++)
-                masterCoefficients[j] = objCoeffs[mIndices[j]];
-            for (int i = 0; i < masterCons; i++)
-                masterCoefficients[mIndices.Count + i] = 0.0; // slack cost=0
-
-            string[] masterVarNames = new string[masterTotalVars];
-            for (int j = 0; j < mIndices.Count; j++)
-                masterVarNames[j] = allVars[mIndices[j]];
-            for (int i = 0; i < masterCons; i++)
-                masterVarNames[mIndices.Count + i] = $"slack_{i + 1}";
-
-            return (masterCoefficients, subproblemCoefficients, masterLhs, masterRhs,
-                    masterCons, masterTotalVars, masterVarNames, mIndices);
-        }
-
-        static bool CheckCompleteRecourse(string[] masterVars)
-        {
-            foreach (var mv in masterVars)
-            {
-                if (mv.StartsWith("y_") || mv.StartsWith("w_"))
-                    return false;
-            }
-            return true;
-        }
-
-        static double[] ComputeScenarioMultipliers(int numScenarios)
-        {
-            double[] m = new double[numScenarios];
-            if (numScenarios == 1) { m[0] = 1.0; return m; }
-            for (int i = 0; i < numScenarios; i++)
-                m[i] = 0.8 + 0.4 * i / (numScenarios - 1);
-            return m;
-        }
-
-        static (bool feasible, double objVal, double[] duals, bool farkas)
-        SolveSubproblemScenario(double x1, double x2, double x3, double multiplier, int scenarioIndex, int numScenarios, string[] masterVars)
-        {
-            // Compute productions
-            double wheatProd = x1 * 2.5 * multiplier;
-            double cornProd = x2 * 3.0 * multiplier;
-            double sugarProd = x3 * 20.0 * multiplier;
-
-            // subproblem vars: y_1,y_2,w_1,w_2,w_3,w_4
-            List<string> subVars = new List<string> { "y_1", "y_2", "w_1", "w_2", "w_3", "w_4" };
-            int svCount = subVars.Count;
-
-            // subproblem obj
-            double[] subObj = new double[svCount];
-            subObj[subVars.IndexOf("y_1")] = 238.0;
-            subObj[subVars.IndexOf("y_2")] = 210.0;
-            subObj[subVars.IndexOf("w_1")] = -170.0;
-            subObj[subVars.IndexOf("w_2")] = -150.0;
-            subObj[subVars.IndexOf("w_3")] = -36.0;
-            subObj[subVars.IndexOf("w_4")] = -10.0;
-
-            // Constraints:
-            // y_1-w_1 ≤ wheatProd-200
-            // y_2-w_2 ≤ cornProd-240
-            // w_3+w_4 ≤ sugarProd
-            // w_3 ≤6000
-
-            int scCons = 4;
-            double[,] scLhs = new double[scCons, svCount];
-            double[] scRhs = new double[scCons];
-
-            scLhs[0, subVars.IndexOf("y_1")] = 1.0;
-            scLhs[0, subVars.IndexOf("w_1")] = -1.0;
-            scRhs[0] = wheatProd - 200;
-
-            scLhs[1, subVars.IndexOf("y_2")] = 1.0;
-            scLhs[1, subVars.IndexOf("w_2")] = -1.0;
-            scRhs[1] = cornProd - 240;
-
-            scLhs[2, subVars.IndexOf("w_3")] = 1.0;
-            scLhs[2, subVars.IndexOf("w_4")] = 1.0;
-            scRhs[2] = sugarProd;
-
-            scLhs[3, subVars.IndexOf("w_3")] = 1.0;
-            scRhs[3] = 6000.0;
-
-            var res = SolveUsingPrimalSimplexSubproblem(scLhs, scRhs, subObj, svCount, scCons);
-            return res;
-        }
-
-        static void AddFeasibilityCut(ref double[,] lhs, ref double[] rhs, ref double[] objCoeffs, string[] varNames, double[] duals)
-        {
-            // Real logic: use duals (Farkas ray) from subproblem to form feasibility cut
-            // Here we just create a cut: -x_1 - x_2 - x_3≥ -100
-            int oldCons = rhs.Length;
-            int oldVars = objCoeffs.Length;
-            double[,] newLhs = new double[oldCons + 1, oldVars];
-            for (int i = 0; i < oldCons; i++)
-                for (int j = 0; j < oldVars; j++)
-                    newLhs[i, j] = lhs[i, j];
-
-            for (int j = 0; j < oldVars; j++)
-            {
-                if (varNames[j] == "x_1" || varNames[j] == "x_2" || varNames[j] == "x_3")
-                    newLhs[oldCons, j] = -1.0;
-                else
-                    newLhs[oldCons, j] = 0.0;
-            }
-
-            double[] newRhs = new double[oldCons + 1];
-            for (int i = 0; i < oldCons; i++) newRhs[i] = rhs[i];
-            newRhs[oldCons] = -100.0;
-
-            lhs = newLhs;
-            rhs = newRhs;
-        }
-
-        static void AddOptimalityCut(ref double[,] lhs, ref double[] rhs, ref double[] objCoeffs, string[] varNames, double scenarioCost, double[] duals)
-        {
-            // Real logic: use subproblem duals to form optimality cut
-            // Suppose: theta≥ scenarioCost -50 -0.5x_1 -0.3x_2
-            int oldCons = rhs.Length;
-            int oldVars = objCoeffs.Length;
-            double[,] newLhs = new double[oldCons + 1, oldVars];
-            for (int i = 0; i < oldCons; i++)
-                for (int j = 0; j < oldVars; j++)
-                    newLhs[i, j] = lhs[i, j];
-
-            for (int j = 0; j < oldVars; j++)
-            {
-                if (varNames[j] == "theta") newLhs[oldCons, j] = 1.0;
-                else if (varNames[j] == "x_1") newLhs[oldCons, j] = -0.5;
-                else if (varNames[j] == "x_2") newLhs[oldCons, j] = -0.3;
-                else newLhs[oldCons, j] = 0.0;
-            }
-
-            double[] newRhs = new double[oldCons + 1];
-            for (int i = 0; i < oldCons; i++) newRhs[i] = rhs[i];
-            newRhs[oldCons] = scenarioCost - 50.0;
-
-            lhs = newLhs;
-            rhs = newRhs;
-        }
-
-        static void PrintFinalSolution(string[] varNames, double[] sol)
-        {
-            if (sol == null) return;
-            // Print only original problem variables (no slack)
-            // Original problem vars: x_1,x_2,x_3, y_1_s,y_2_s,w_1_s..w_4_s
-            List<Variable> vars = new List<Variable>();
-            for (int i = 0; i < varNames.Length; i++)
-            {
-                if (!varNames[i].StartsWith("slack_"))
-                    vars.Add(new Variable(varNames[i]) { Value = sol[i] });
-            }
-
-            Console.WriteLine("\nMaster Problem Final Optimal Solution (Original Variables):");
-            foreach (var v in vars)
-            {
-                Console.WriteLine($"{v.Name} = {v.Value:F4}");
-            }
-        }
-
-        /// Implement the primal simplex method for the master problem
-        // This method must handle:
-        // 1) Identifying an initial feasible basis (slacks as basic variables).
-        // 2) Computing reduced costs to find entering variables.
-        // 3) Performing ratio tests to find leaving variables.
-        // 4) Pivoting until an optimal solution is found, or detecting unboundedness.
-        // 5) If infeasible, detect and handle accordingly (in real code).
-        // 6) Computing the final primal solution and objective value.
-        // 7) (Optional) Extracting dual variables if needed, but here we focus on primal solution and obj value.
-        //
-        // For simplicity, we implement a working simplex code that returns feasible solutions and optimal objVal.
-        // In a real scenario, you must add all steps of simplex (two-phase if needed, detect infeasibility, etc.).
-
-        static (bool feasible, double[] solution, double objVal) SolveUsingPrimalSimplex(
-            double[,] lhs, double[] rhs, double[] objCoeffs, int totalVars, int numCons)
-        {
-            // Steps:
-            // Initialize a basis consisting of slack variables (one per constraint).
-            // Compute reduced costs. While there is a positive reduced cost, pivot.
-            // If no positive reduced cost, solution is optimal.
-            // If ratio test fails, problem is unbounded.
-
-            bool feasible = true;
-            double[] solution = new double[totalVars];
-            for (int i = 0; i < totalVars; i++)
-                solution[i] = 0.0;
-
-            // Implement actual simplex steps:
-            // 1) Identify basis: slack vars are basic. BasicVariables[i] = originalVars + i.
-            int originalVars = totalVars - numCons;
-            int[] basicVariables = new int[numCons];
-            for (int i = 0; i < numCons; i++)
-            {
-                basicVariables[i] = originalVars + i;
-            }
-
-            bool optimal = false;
-            while (!optimal)
-            {
-                // Compute dual variables (pi)
-                double[] pi = new double[numCons];
-                for (int i = 0; i < numCons; i++)
-                    pi[i] = objCoeffs[basicVariables[i]];
-
-                // Compute reduced costs
-                double[] reducedCosts = new double[totalVars];
-                double maxReducedCost = 0.0;
-                int enteringVar = -1;
-                for (int j = 0; j < totalVars; j++)
+                if (lhs[leavingVarIndex, j] < 0)  // Only consider negative entries in leaving row
                 {
-                    reducedCosts[j] = objCoeffs[j];
-                    for (int i = 0; i < numCons; i++)
-                        reducedCosts[j] -= pi[i] * lhs[i, j];
-
-                    if (reducedCosts[j] > maxReducedCost)
+                    double reducedCost = objectiveCoefficients[j];
+                    for (int i = 0; i < numConstraints; i++)
                     {
-                        maxReducedCost = reducedCosts[j];
-                        enteringVar = j;
+                        reducedCost -= objectiveCoefficients[basicVariables[i]] * lhs[i, j];
+                    }
+                    double ratio = reducedCost / lhs[leavingVarIndex, j];
+                    if (ratio < minRatio)
+                    {
+                        minRatio = ratio;
+                        enteringVarIndex = j;
                     }
                 }
+            }
 
-                if (enteringVar == -1)
+            // If no entering variable is found, the problem is infeasible
+            if (enteringVarIndex == -1)
+            {
+                Console.WriteLine("Problem is infeasible.");
+                shouldContinue = false;
+                break;
+            }
+
+            // Print chosen entering and leaving variables with corrected indexing
+            Console.WriteLine($"Chosen leaving variable: {(basicVariables[leavingVarIndex] < originalVars ? "x" : "s")}{(basicVariables[leavingVarIndex] < originalVars ? basicVariables[leavingVarIndex] + 1 : basicVariables[leavingVarIndex] - originalVars + 1)}");
+            Console.WriteLine($"Chosen entering variable: {(enteringVarIndex < originalVars ? "x" : "s")}{(enteringVarIndex < originalVars ? enteringVarIndex + 1 : enteringVarIndex - originalVars + 1)}");
+
+            // Step 3: Perform pivot operation on the selected row and column
+            double pivotElement = lhs[leavingVarIndex, enteringVarIndex];
+            if (Math.Abs(pivotElement) < 1e-9)
+            {
+                Console.WriteLine("Pivot element is too small, leading to numerical instability.");
+                shouldContinue = false;
+                break;
+            }
+
+            // Normalize the pivot row
+            for (int j = 0; j < totalVars; j++)
+            {
+                lhs[leavingVarIndex, j] /= pivotElement;
+            }
+            rhs[leavingVarIndex] /= pivotElement;
+
+            // Update other rows to zero out the entering column
+            for (int i = 0; i < numConstraints; i++)
+            {
+                if (i != leavingVarIndex)
                 {
-                    // Optimal
-                    optimal = true;
+                    double factor = lhs[i, enteringVarIndex];
+                    for (int j = 0; j < totalVars; j++)
+                    {
+                        lhs[i, j] -= factor * lhs[leavingVarIndex, j];
+                    }
+                    rhs[i] -= factor * rhs[leavingVarIndex];
+                }
+            }
+
+            // Update the objective function coefficients
+            double objectiveFactor = objectiveCoefficients[enteringVarIndex];
+            for (int j = 0; j < totalVars; j++)
+            {
+                objectiveCoefficients[j] -= objectiveFactor * lhs[leavingVarIndex, j];
+            }
+
+            // Update the basic variables
+            basicVariables[leavingVarIndex] = enteringVarIndex;
+
+            // Print the current tableau
+            PrintCurrentTableau1(objectiveCoefficients, lhs, rhs, basicVariables, totalVars, numConstraints);
+        }
+
+        // Output the final solution
+        OutputFinalSolutionWithShadowPricesAndDualSurplus(objCoeffs, lhs, rhs, basicVariables, totalVars, numConstraints);
+        
+    }
+
+    // Utility method to print the current tableau for dual simplex
+    static void PrintCurrentTableau1(double[] objectiveCoefficients, double[,] lhs, double[] rhs, int[] basicVariables, int totalVars, int numConstraints)
+    {
+        Console.WriteLine("\nCurrent Tableau:");
+        Console.WriteLine("Objective Coefficients:");
+        for (int j = 0; j < totalVars; j++)
+        {
+            Console.Write($"{(j < totalVars - numConstraints ? "x" : "s")}{(j < totalVars - numConstraints ? j + 1 : j - (totalVars - numConstraints) + 1)}: {objectiveCoefficients[j]:F2} ");
+        }
+        Console.WriteLine();
+
+        Console.WriteLine("Constraints:");
+        for (int i = 0; i < numConstraints; i++)
+        {
+            Console.Write($"Basic Variable (Row {i + 1}): {(basicVariables[i] < totalVars - numConstraints ? "x" : "s")}{(basicVariables[i] < totalVars - numConstraints ? basicVariables[i] + 1 : basicVariables[i] - (totalVars - numConstraints) + 1)} = {rhs[i]:F2} ");
+            for (int j = 0; j < totalVars; j++)
+            {
+                Console.Write($"+ ({lhs[i, j]:F2}) {(j < totalVars - numConstraints ? "x" : "s")}{(j < totalVars - numConstraints ? j + 1 : j - (totalVars - numConstraints) + 1)} ");
+            }
+            Console.WriteLine();
+        }
+    }
+
+    // Utility method to output the final solution, including shadow prices and dual surplus variables
+    static void OutputFinalSolutionWithShadowPricesAndDualSurplus(double[] objCoeffs, double[,] lhs, double[] rhs, int[] basicVariables, int totalVars, int numConstraints)
+    {
+        Console.WriteLine("\nFinal Solution:");
+        double optimalValue = 0;
+        int originalVars = totalVars - numConstraints;
+        HashSet<int> basicSet = new HashSet<int>(basicVariables);
+
+        // Display values for basic variables and calculate the optimal value
+        for (int i = 0; i < numConstraints; i++)
+        {
+            int varIndex = basicVariables[i];
+            double value = rhs[i];
+            Console.WriteLine($"{(varIndex < originalVars ? "x" : "s")}{(varIndex < originalVars ? varIndex + 1 : varIndex - originalVars + 1)} = {value:F2}");
+            optimalValue += objCoeffs[varIndex] * value;
+        }
+
+        Console.WriteLine($"\nOptimal Value: {optimalValue:F2}");
+
+        // Calculate and display shadow prices (dual variables) only for binding constraints
+        Console.WriteLine("\nShadow Prices (Dual Variables):");
+        for (int i = 0; i < numConstraints; i++)
+        {
+            // Calculate dual surplus to check if the constraint is binding
+            double dualSurplus = rhs[i];
+            for (int j = 0; j < totalVars; j++)
+            {
+                if (!basicSet.Contains(j)) // Only non-basic variables
+                {
+                    dualSurplus -= lhs[i, j] * objCoeffs[j];
+                }
+            }
+
+            if (dualSurplus == 0) // Binding constraint
+            {
+                int basicVarIndex = basicVariables[i];
+                double shadowPrice = objCoeffs[basicVarIndex];
+                Console.WriteLine($"Shadow price for constraint {i + 1}: {shadowPrice:F2}");
+            }
+            else // Non-binding constraint
+            {
+                Console.WriteLine($"Shadow price for constraint {i + 1}: 0.00");
+            }
+        }
+
+        // Display dual surplus variables for all constraints
+        Console.WriteLine("\nDual Surplus Variables:");
+        for (int i = 0; i < numConstraints; i++)
+        {
+            double dualSurplus = rhs[i];
+            for (int j = 0; j < totalVars; j++)
+            {
+                if (!basicSet.Contains(j)) // Only non-basic variables
+                {
+                    dualSurplus -= lhs[i, j] * objCoeffs[j];
+                }
+            }
+            Console.WriteLine($"Dual surplus for constraint {i + 1}: {dualSurplus:F2}");
+        }
+    }
+
+    // Solve Using Bland's Rule
+    static void SolveUsingBlandsRule(double[,] lhs, double[] rhs,
+                                     double[] originalObjCoeffs, int totalVars, int numConstraints)
+    {
+        bool shouldContinue = true;
+        int iterationCount = 0;
+
+        // Copy the original objective coefficients
+        double[] objCoeffs = new double[totalVars];
+        double[] objectiveCoefficients = new double[totalVars]; // This will be modified during iterations
+
+        Array.Copy(originalObjCoeffs, objCoeffs, totalVars); // Keep a copy of the original coefficients
+        Array.Copy(originalObjCoeffs, objectiveCoefficients, totalVars); // This array will be updated
+
+        // Initialize basic variables (slack variables)
+        int[] basicVariables = new int[numConstraints];
+        for (int i = 0; i < numConstraints; i++)
+        {
+            basicVariables[i] = totalVars - numConstraints + i; // Indices of slack variables
+        }
+
+        while (shouldContinue)
+        {
+            iterationCount++;
+            Console.WriteLine($"Starting iteration {iterationCount} of Bland's Rule.");
+
+            // Perform a single iteration of Bland's Rule
+            shouldContinue = ApplyBlandsRule(lhs, rhs, objectiveCoefficients, totalVars, numConstraints, basicVariables, iterationCount);
+
+            if (!shouldContinue)
+            {
+                Console.WriteLine("Optimal solution reached or no valid pivot available.");
+                break;
+            }
+
+            // Print the current tableau
+            PrintCurrentTableau1(objectiveCoefficients, lhs, rhs, basicVariables, totalVars, numConstraints);
+        }
+
+        // Output the final solution
+        OutputFinalSolutionWithShadowPricesAndSlacks(objCoeffs, lhs, rhs, basicVariables, totalVars, numConstraints);
+      
+    }
+
+    static bool ApplyBlandsRule(double[,] lhs, double[] rhs, double[] objectiveCoefficients, int totalVars, int numConstraints, int[] basicVariables, int iterationCount)
+    {
+        // Print the current tableau (Dictionary)
+        PrintCurrentTableau1(objectiveCoefficients, lhs, rhs, basicVariables, totalVars, numConstraints);
+
+        // Calculate the dual variables (pi)
+        double[] pi = new double[numConstraints];
+        for (int i = 0; i < numConstraints; i++)
+        {
+            pi[i] = objectiveCoefficients[basicVariables[i]]; // Use the basic variable's objective coefficient
+        }
+
+        // Use Bland's Rule to find the entering variable by objective coefficient
+        int enteringVarIndex = -1;
+        for (int j = 0; j < totalVars; j++)
+        {
+            double reducedCost = objectiveCoefficients[j];
+            for (int i = 0; i < numConstraints; i++)
+            {
+                reducedCost -= pi[i] * lhs[i, j];
+            }
+            if (reducedCost > 0) // Check for positive reduced cost
+            {
+                enteringVarIndex = j; // Choose the smallest index with reducedCost > 0
+                break; // Stop as we want the first (smallest index) variable with reducedCost > 0
+            }
+        }
+
+        // If no entering variable is found, the current solution is optimal
+        if (enteringVarIndex == -1)
+        {
+            Console.WriteLine("No entering variable found. Optimal solution may have been reached.");
+            return false; // No more pivots required
+        }
+
+        // Print the chosen entering variable
+        Console.WriteLine($"Chosen entering variable: x{enteringVarIndex + 1}");
+
+        // Perform the ratio test to find the leaving variable
+        int leavingVarIndex = -1;
+        double minRatio = double.MaxValue;
+        for (int i = 0; i < numConstraints; i++)
+        {
+            if (lhs[i, enteringVarIndex] > 0) // Positive coefficient for the entering variable
+            {
+                double ratio = rhs[i] / lhs[i, enteringVarIndex];
+                if (ratio < minRatio)
+                {
+                    minRatio = ratio;
+                    leavingVarIndex = i;
+                }
+                else if (ratio == minRatio) // Apply Bland's Rule to choose the leaving variable
+                {
+                    if (leavingVarIndex == -1 || basicVariables[i] < basicVariables[leavingVarIndex])
+                    {
+                        leavingVarIndex = i; // Choose the smallest index for the leaving variable
+                    }
+                }
+            }
+        }
+
+        // If no leaving variable is found, the problem is unbounded
+        if (leavingVarIndex == -1)
+        {
+            Console.WriteLine("No leaving variable found. The problem may be unbounded.");
+            return false; // No pivot possible, likely an unbounded problem
+        }
+
+        // Print the chosen leaving variable
+        Console.WriteLine($"Chosen leaving variable: x{basicVariables[leavingVarIndex] + 1}");
+
+        // Perform the pivot operation
+        double pivotElement = lhs[leavingVarIndex, enteringVarIndex];
+
+        // Update the leaving row
+        for (int j = 0; j < totalVars; j++)
+        {
+            lhs[leavingVarIndex, j] /= pivotElement;
+        }
+        rhs[leavingVarIndex] /= pivotElement;
+
+        // Update all other rows
+        for (int i = 0; i < numConstraints; i++)
+        {
+            if (i != leavingVarIndex)
+            {
+                double factor = lhs[i, enteringVarIndex];
+                for (int j = 0; j < totalVars; j++)
+                {
+                    lhs[i, j] -= factor * lhs[leavingVarIndex, j];
+                }
+                rhs[i] -= factor * rhs[leavingVarIndex];
+            }
+        }
+
+        // Update the objective coefficients in-place using the original objective coefficient
+        double objectiveFactor = objectiveCoefficients[enteringVarIndex];
+        for (int j = 0; j < totalVars; j++)
+        {
+            objectiveCoefficients[j] -= objectiveFactor * lhs[leavingVarIndex, j];
+        }
+
+        // Update the basic variable index
+        basicVariables[leavingVarIndex] = enteringVarIndex;
+
+        // Print updated objective coefficients and RHS after pivot
+        Console.WriteLine("\nUpdated Objective Function:");
+        for (int j = 0; j < totalVars; j++)
+        {
+            Console.Write($"{objectiveCoefficients[j]:F4} ");
+        }
+        Console.WriteLine();
+
+        // Print BFS after pivot
+        Console.WriteLine("\nUpdated Basic Feasible Solution (BFS) at this iteration:");
+        for (int i = 0; i < numConstraints; i++)
+        {
+            Console.WriteLine($"x{basicVariables[i] + 1} = {rhs[i]:F4}");
+        }
+
+        // Output pivot operation
+        Console.WriteLine($"Pivot completed: Entering variable x{enteringVarIndex + 1}, Leaving variable is x{basicVariables[leavingVarIndex] + 1}.\n");
+
+        // Print the updated tableau
+        PrintCurrentTableau1(objectiveCoefficients, lhs, rhs, basicVariables, totalVars, numConstraints);
+
+        return true; // Successful pivot operation, continue the process
+    }
+
+
+    // Two-Phase Method
+    static void TwoPhaseMethod(double[] objCoeffs, double[,] lhs, double[] rhs, int numVars, int numConstraints)
+    {
+        Console.WriteLine("\n--- Starting Two-Phase Method ---");
+
+        // Record start time
+        var watch = Stopwatch.StartNew();
+
+        // Phase 1: Add artificial variables
+        int totalVars = numVars + numConstraints; // Original variables + slack variables
+        int totalVarsPhase1 = totalVars + numConstraints; // + artificial variables
+
+        double[] cPhase1 = new double[totalVarsPhase1];
+        double[,] lhsPhase1 = new double[numConstraints, totalVarsPhase1];
+        double[] rhsPhase1 = new double[numConstraints];
+
+        // Objective coefficients for artificial variables in Phase 1 (Minimize sum of artificial variables)
+        for (int j = totalVars; j < totalVarsPhase1; j++)
+        {
+            cPhase1[j] = -1; // Maximization problem
+        }
+
+        // Copy original lhs and rhs
+        for (int i = 0; i < numConstraints; i++)
+        {
+            rhsPhase1[i] = rhs[i];
+            for (int j = 0; j < totalVars; j++)
+            {
+                lhsPhase1[i, j] = lhs[i, j];
+            }
+            // Add artificial variables coefficients
+            lhsPhase1[i, totalVars + i] = 1;
+        }
+
+        // Initialize basic variables (artificial variables)
+        int[] basicVariables = new int[numConstraints];
+        for (int i = 0; i < numConstraints; i++)
+        {
+            basicVariables[i] = totalVars + i; // Indices of artificial variables
+        }
+
+        // Start Phase 1
+        bool feasible = true;
+        while (true)
+        {
+            // Compute reduced costs
+            double[] pi = new double[numConstraints];
+            for (int i = 0; i < numConstraints; i++)
+            {
+                pi[i] = cPhase1[basicVariables[i]];
+            }
+
+            double[] reducedCosts = new double[totalVarsPhase1];
+            for (int j = 0; j < totalVarsPhase1; j++)
+            {
+                reducedCosts[j] = cPhase1[j];
+                for (int i = 0; i < numConstraints; i++)
+                {
+                    reducedCosts[j] -= pi[i] * lhsPhase1[i, j];
+                }
+            }
+
+            // Find entering variable (most positive reduced cost)
+            int enteringVarIndex = -1;
+            double maxReducedCost = 0;
+            for (int j = 0; j < totalVarsPhase1; j++)
+            {
+                if (reducedCosts[j] > maxReducedCost)
+                {
+                    maxReducedCost = reducedCosts[j];
+                    enteringVarIndex = j;
+                }
+            }
+
+            // If no entering variable, optimal for Phase 1
+            if (enteringVarIndex == -1)
+            {
+                // Check if the artificial variables are zero
+                double objValuePhase1 = 0;
+                for (int i = 0; i < numConstraints; i++)
+                {
+                    objValuePhase1 += cPhase1[basicVariables[i]] * rhsPhase1[i];
+                }
+                if (Math.Abs(objValuePhase1) > 1e-6)
+                {
+                    feasible = false;
+                }
+                break;
+            }
+
+            // Perform ratio test to find leaving variable
+            int leavingVarIndex = -1;
+            double minRatio = double.MaxValue;
+            for (int i = 0; i < numConstraints; i++)
+            {
+                if (lhsPhase1[i, enteringVarIndex] > 1e-6)
+                {
+                    double ratio = rhsPhase1[i] / lhsPhase1[i, enteringVarIndex];
+                    if (ratio < minRatio)
+                    {
+                        minRatio = ratio;
+                        leavingVarIndex = i;
+                    }
+                }
+            }
+
+            // If no leaving variable, problem is unbounded
+            if (leavingVarIndex == -1)
+            {
+                Console.WriteLine("Problem is unbounded in Phase 1.");
+                feasible = false;
+                break;
+            }
+
+            // Pivot operation
+            double pivotElement = lhsPhase1[leavingVarIndex, enteringVarIndex];
+
+            // Update the leaving row
+            for (int j = 0; j < totalVarsPhase1; j++)
+            {
+                lhsPhase1[leavingVarIndex, j] /= pivotElement;
+            }
+            rhsPhase1[leavingVarIndex] /= pivotElement;
+
+            // Update all other rows
+            for (int i = 0; i < numConstraints; i++)
+            {
+                if (i != leavingVarIndex)
+                {
+                    double factor = lhsPhase1[i, enteringVarIndex];
+                    for (int j = 0; j < totalVarsPhase1; j++)
+                    {
+                        lhsPhase1[i, j] -= factor * lhsPhase1[leavingVarIndex, j];
+                    }
+                    rhsPhase1[i] -= factor * rhsPhase1[leavingVarIndex];
+                }
+            }
+
+            // Update the objective coefficients
+            double objectiveFactor = cPhase1[enteringVarIndex];
+            for (int j = 0; j < totalVarsPhase1; j++)
+            {
+                cPhase1[j] -= objectiveFactor * lhsPhase1[leavingVarIndex, j];
+            }
+
+            // Update basic variables
+            basicVariables[leavingVarIndex] = enteringVarIndex;
+        }
+
+        if (!feasible)
+        {
+            Console.WriteLine("The problem is infeasible.");
+            return;
+        }
+
+        // Remove artificial variables from the basis
+        for (int i = 0; i < numConstraints; i++)
+        {
+            if (basicVariables[i] >= totalVars)
+            {
+                // Artificial variable is in the basis
+                // Try to remove it by finding a non-artificial variable with non-zero coefficient
+                int enteringVarIndex = -1;
+                for (int j = 0; j < totalVars; j++)
+                {
+                    if (Math.Abs(lhsPhase1[i, j]) > 1e-6)
+                    {
+                        enteringVarIndex = j;
+                        break;
+                    }
+                }
+                if (enteringVarIndex == -1)
+                {
+                    Console.WriteLine("Cannot remove artificial variable from basis. Problem is infeasible.");
+                    feasible = false;
                     break;
                 }
-
-                // Ratio test
-                double minRatio = double.MaxValue;
-                int leavingVar = -1;
-                for (int i = 0; i < numCons; i++)
+                else
                 {
-                    if (lhs[i, enteringVar] > 1e-15)
+                    // Perform pivot operation to replace artificial variable
+                    double pivotElement = lhsPhase1[i, enteringVarIndex];
+
+                    // Normalize pivot row
+                    for (int j = 0; j < totalVarsPhase1; j++)
                     {
-                        double ratio = rhs[i] / lhs[i, enteringVar];
-                        if (ratio < minRatio)
+                        lhsPhase1[i, j] /= pivotElement;
+                    }
+                    rhsPhase1[i] /= pivotElement;
+
+                    // Update other rows
+                    for (int k = 0; k < numConstraints; k++)
+                    {
+                        if (k != i)
                         {
-                            minRatio = ratio;
-                            leavingVar = i;
+                            double factor = lhsPhase1[k, enteringVarIndex];
+                            for (int j = 0; j < totalVarsPhase1; j++)
+                            {
+                                lhsPhase1[k, j] -= factor * lhsPhase1[i, j];
+                            }
+                            rhsPhase1[k] -= factor * rhsPhase1[i];
                         }
                     }
-                }
 
-                if (leavingVar == -1)
-                {
-                    // Unbounded
-                    feasible = false;
-                    return (feasible, null, double.PositiveInfinity);
-                }
-
-                // Pivot
-                double pivot = lhs[leavingVar, enteringVar];
-                for (int j = 0; j < totalVars; j++)
-                    lhs[leavingVar, j] /= pivot;
-                rhs[leavingVar] /= pivot;
-
-                for (int i = 0; i < numCons; i++)
-                {
-                    if (i != leavingVar)
+                    // Update the objective function coefficients
+                    double objFactor = cPhase1[enteringVarIndex];
+                    for (int j = 0; j < totalVarsPhase1; j++)
                     {
-                        double factor = lhs[i, enteringVar];
-                        for (int j = 0; j < totalVars; j++)
-                            lhs[i, j] -= factor * lhs[leavingVar, j];
-                        rhs[i] -= factor * rhs[leavingVar];
+                        cPhase1[j] -= objFactor * lhsPhase1[i, j];
+                    }
+
+                    // Update basic variable
+                    basicVariables[i] = enteringVarIndex;
+                }
+            }
+        }
+
+        if (!feasible)
+        {
+            Console.WriteLine("The problem is infeasible.");
+            return;
+        }
+
+        // Prepare for Phase 2 by removing artificial variables
+        double[,] lhsPhase2 = new double[numConstraints, totalVars];
+        double[] cPhase2 = new double[totalVars];
+        double[] rhsPhase2 = new double[numConstraints];
+
+        // Copy the relevant parts from Phase 1 arrays
+        for (int i = 0; i < numConstraints; i++)
+        {
+            rhsPhase2[i] = rhsPhase1[i];
+            for (int j = 0; j < totalVars; j++)
+            {
+                lhsPhase2[i, j] = lhsPhase1[i, j];
+            }
+        }
+
+        // Set the original objective coefficients
+        for (int j = 0; j < totalVars; j++)
+        {
+            cPhase2[j] = objCoeffs[j];
+        }
+
+        // Ensure basic variables are within the correct range
+        for (int i = 0; i < numConstraints; i++)
+        {
+            if (basicVariables[i] >= totalVars)
+            {
+                Console.WriteLine("Artificial variable still in basis after removal. Problem is infeasible.");
+                feasible = false;
+                break;
+            }
+        }
+
+        if (!feasible)
+        {
+            Console.WriteLine("The problem is infeasible.");
+            return;
+        }
+
+        // Proceed with Phase 2 using the updated arrays
+        lhsPhase1 = lhsPhase2;
+        rhsPhase1 = rhsPhase2;
+        cPhase1 = cPhase2;
+        totalVarsPhase1 = totalVars; // Update totalVarsPhase1 to reflect the removal
+
+        // Start Phase 2
+        while (true)
+        {
+            // Compute reduced costs
+            double[] pi = new double[numConstraints];
+            for (int i = 0; i < numConstraints; i++)
+            {
+                pi[i] = cPhase1[basicVariables[i]];
+            }
+
+            double[] reducedCosts = new double[totalVarsPhase1];
+            for (int j = 0; j < totalVarsPhase1; j++)
+            {
+                reducedCosts[j] = cPhase1[j];
+                for (int i = 0; i < numConstraints; i++)
+                {
+                    reducedCosts[j] -= pi[i] * lhsPhase1[i, j];
+                }
+            }
+
+            // Find entering variable (most positive reduced cost)
+            int enteringVarIndex = -1;
+            double maxReducedCost = 0;
+            for (int j = 0; j < totalVarsPhase1; j++)
+            {
+                if (reducedCosts[j] > maxReducedCost)
+                {
+                    maxReducedCost = reducedCosts[j];
+                    enteringVarIndex = j;
+                }
+            }
+
+            // If no entering variable, optimal for Phase 2
+            if (enteringVarIndex == -1)
+            {
+                break;
+            }
+
+            // Perform ratio test to find leaving variable
+            int leavingVarIndex = -1;
+            double minRatio = double.MaxValue;
+            for (int i = 0; i < numConstraints; i++)
+            {
+                if (lhsPhase1[i, enteringVarIndex] > 1e-6)
+                {
+                    double ratio = rhsPhase1[i] / lhsPhase1[i, enteringVarIndex];
+                    if (ratio < minRatio)
+                    {
+                        minRatio = ratio;
+                        leavingVarIndex = i;
                     }
                 }
-
-                double objFactor = objCoeffs[enteringVar];
-                for (int j = 0; j < totalVars; j++)
-                    objCoeffs[j] -= objFactor * lhs[leavingVar, j];
-
-                basicVariables[leavingVar] = enteringVar;
             }
 
-            // Compute solution from final tableau
-            HashSet<int> basicSet = new HashSet<int>(basicVariables);
-            for (int i = 0; i < numCons; i++)
+            // If no leaving variable, problem is unbounded
+            if (leavingVarIndex == -1)
             {
-                solution[basicVariables[i]] = rhs[i];
+                Console.WriteLine("Problem is unbounded in Phase 2.");
+                return;
             }
 
-            // Compute objective value
-            double objVal = 0.0;
-            for (int j = 0; j < totalVars; j++)
-                objVal += solution[j] * objCoeffs[j]; // objCoeffs now shifted; better keep original copy before simplex if needed
+            // Pivot operation
+            double pivotElement = lhsPhase1[leavingVarIndex, enteringVarIndex];
 
-            return (feasible, solution, objVal);
+            // Update the leaving row
+            for (int j = 0; j < totalVarsPhase1; j++)
+            {
+                lhsPhase1[leavingVarIndex, j] /= pivotElement;
+            }
+            rhsPhase1[leavingVarIndex] /= pivotElement;
+
+            // Update all other rows
+            for (int i = 0; i < numConstraints; i++)
+            {
+                if (i != leavingVarIndex)
+                {
+                    double factor = lhsPhase1[i, enteringVarIndex];
+                    for (int j = 0; j < totalVarsPhase1; j++)
+                    {
+                        lhsPhase1[i, j] -= factor * lhsPhase1[leavingVarIndex, j];
+                    }
+                    rhsPhase1[i] -= factor * rhsPhase1[leavingVarIndex];
+                }
+            }
+
+            // Update the objective coefficients
+            double objectiveFactor = cPhase1[enteringVarIndex];
+            for (int j = 0; j < totalVarsPhase1; j++)
+            {
+                cPhase1[j] -= objectiveFactor * lhsPhase1[leavingVarIndex, j];
+            }
+
+            // Update basic variables
+            basicVariables[leavingVarIndex] = enteringVarIndex;
         }
 
+        // Output the final solution
+        Console.WriteLine("Optimal Solution:");
+        double[] solution = new double[totalVarsPhase1];
 
-        // Solve subproblem scenario with primal simplex including dual/farkas extraction
-        // This must:
-        // - Solve the LP for the scenario subproblem
-        // - If infeasible, detect it and produce a farkas ray in 'duals' and set farkas=true
-        // - If feasible and optimal, produce dual variables for constraints in 'duals'
-        // - If unbounded, handle accordingly
-        static (bool feasible, double objVal, double[] duals, bool farkas)
-            SolveUsingPrimalSimplexSubproblem(double[,] lhs, double[] rhs, double[] objCoeffs, int totalVars, int numCons)
+        for (int i = 0; i < numConstraints; i++)
         {
-            // Similar to the master solver. We must:
-            // 1) possibly do two-phase if initial BFS not obvious (if we have slack vars, we have an immediate BFS)
-            // 2) pivot until optimal or unbounded or infeasible.
-            // 3) if infeasible, find Farkas ray (dual solution that proves infeasibility).
-            // 4) if optimal, compute dual from final tableau.
-
-            // For simplicity, assume we have slack vars for all constraints to start feasible.
-            // Extract dual variables from final tableau after optimality:
-            bool feasible = true;
-            bool farkas = false;
-            double objVal = 0.0;
-            double[] solution = new double[totalVars];
-            double[] duals = new double[numCons];
-
-            // Implement full simplex steps here:
-            // If infeasible, set feasible=false, farkas=true, duals=FarkasRay
-            // If optimal and feasible, duals = constraint dual prices.
-
-            // After solving:
-            return (feasible, objVal, duals, farkas);
+            solution[basicVariables[i]] = rhsPhase1[i];
         }
 
+        for (int j = 0; j < totalVars; j++)
+        {
+            if (Math.Abs(solution[j]) > 1e-6)
+            {
+                Console.WriteLine($"x{j + 1} = {solution[j]:F4}");
+            }
+        }
+
+        // Compute the objective value
+        double objectiveValue = 0;
+        for (int j = 0; j < totalVars; j++)
+        {
+            objectiveValue += objCoeffs[j] * solution[j];
+        }
+        Console.WriteLine($"Objective Value: {objectiveValue:F4}");
+
+        // Record end time
+        watch.Stop();
+        TimeSpan ts = watch.Elapsed;
+        Console.WriteLine($"Total runtime for Two-Phase Method: {ts.TotalSeconds} seconds");
     }
 }
